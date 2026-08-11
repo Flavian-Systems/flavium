@@ -1,0 +1,23 @@
+name: Mirror to Codeberg
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CODEBERG_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan codeberg.org >> ~/.ssh/known_hosts
+      - name: Push branches and tags
+        run: |
+          git clone --bare https://github.com/Flavian-Systems/flavium.git repo
+          cd repo
+          git push --prune git@codeberg.org:Flavian-Systems/flavium.git \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
