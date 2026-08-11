@@ -2,5 +2,12 @@
 *.png binary
 *.jpg binary
 *.zip binary
+*.rar binary
+*.7z binary
+*.tar binary
+*.gz binary
+*.iso binary
+*.pdf binary
 *.docx binary
 *.pptx binary
+*.xlsx binary
