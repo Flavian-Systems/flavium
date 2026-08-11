@@ -1,0 +1,12 @@
+[package]
+name = "flavium-policy"
+description = "Flavium policy (pre-v0.1 skeleton)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

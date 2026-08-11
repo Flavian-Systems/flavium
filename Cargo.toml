@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flavium-core",
+    "crates/flavium-policy",
+    "crates/flavium-proxy-mcp",
+    "crates/flavium-cli",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Flavian-Systems/flavium"
+homepage = "https://flavium.ai"
+authors = ["Flavian Systems <hello@flavium.ai>"]
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
