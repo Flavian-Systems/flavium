@@ -1,0 +1,16 @@
+#!/bin/sh
+# Flavium pre-commit: the exact CI gate, run locally.
+set -e
+
+echo "pre-commit: cargo fmt --check"
+if ! cargo fmt --all -- --check; then
+    echo ""
+    echo "  Formatting issues found. Fix with:  cargo fmt --all"
+    echo "  then re-stage and commit again."
+    exit 1
+fi
+
+echo "pre-commit: cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "pre-commit: OK"

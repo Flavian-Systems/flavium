@@ -22,7 +22,10 @@ mod tests {
     use super::*;
 
     fn g(p: &str, t: &str) -> Grant {
-        Grant { principal: p.into(), tool: t.into() }
+        Grant {
+            principal: p.into(),
+            tool: t.into(),
+        }
     }
 
     #[test]
