@@ -59,9 +59,8 @@ core and future formal-verification target**. In these two crates:
 
 ## Scope guardrails
 
-In scope now (v0.1, tasks T1–T6): MCP proxy, Cedar-backed grants with
-argument constraints, budgets with mid-execution enforcement, attenuated
-delegation + supervision, flight recorder + replay, the injection demo.
+The v0.1 work breakdown lives in docs/tasks/v0.1 — read 
+docs/tasks/v0.1/README.md before starting any task.
 
 Out of scope until explicitly requested: kernel/sandbox work (Landlock,
 seccomp — that's v0.2), Wasm isolation, formal proofs, RISC-V/CHERI, any
