@@ -59,8 +59,8 @@ core and future formal-verification target**. In these two crates:
 
 ## Scope guardrails
 
-The v0.1 work breakdown lives in docs/tasks/v0.1 — read 
-docs/tasks/v0.1/README.md before starting any task.
+The v0.1 work breakdown lives in `docs/tasks/v0.1/` — read 
+`docs/tasks/v0.1/README.md` before starting any task.
 
 Out of scope until explicitly requested: kernel/sandbox work (Landlock,
 seccomp — that's v0.2), Wasm isolation, formal proofs, RISC-V/CHERI, any
