@@ -19,5 +19,5 @@ jobs:
         run: |
           git clone --bare https://github.com/Flavian-Systems/flavium.git repo
           cd repo
-          git push --prune git@codeberg.org:Flavian-Systems/flavium.git \
+          git push --force --prune git@codeberg.org:Flavian-Systems/flavium.git \
             'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
