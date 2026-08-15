@@ -442,10 +442,10 @@ mod tests {
 
     #[test]
     fn bound_helper_tables() {
-        // Monomorphic aliases: the helpers are generic over `T: Ord`, and
+        // Monomorphic wrappers: the helpers are generic over `T: Ord`, and
         // bare integer literals would leave `T` to fallback inference.
-        let lower = lower_bound_within::<i64>;
-        let upper = upper_bound_within::<i64>;
+        let lower = |parent: Option<i64>, child: Option<i64>| lower_bound_within(parent, child);
+        let upper = |parent: Option<i64>, child: Option<i64>| upper_bound_within(parent, child);
 
         assert!(lower(None, None));
         assert!(lower(None, Some(-100)));
