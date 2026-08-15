@@ -1,6 +1,6 @@
 [package]
 name = "flavium-proxy-mcp"
-description = "Flavium MCP proxy: stdio middlebox between MCP clients and upstream tool servers (pre-v0.1)"
+description = "Flavium MCP proxy: middlebox between MCP clients and upstream tool servers (pre-v0.1)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,8 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
@@ -16,7 +18,8 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true
