@@ -44,7 +44,7 @@ second real client).
       the latter records the **negotiated protocol version**.
 - [x] Quitting Claude Desktop leaves no orphan `flavium` or server
       processes behind.
-- [ ] Repeat the connect + tool-call steps with Claude Code as a second
+- [x] Repeat the connect + tool-call steps with Claude Code as a second
       real client: `claude mcp add filesystem -- <same command line>`.
 
 ## Negotiated protocol version — record here
@@ -58,9 +58,13 @@ example together, in the same PR as this file.
 | Date | Client | Client version | Negotiated protocol version |
 |---|---|---|---|
 | 2026-08-15 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
+| 2026-08-15 | Claude Code (clientInfo `claude-code`) | 2.1.173, 2.1.233 | **2025-11-25** |
 
-Two sessions observed, both clean (`client_end=Eof upstream_end=Eof
-delivery_failed=false rejected=0 dropped=0`); upstream
+Claude Desktop: two sessions observed, both clean (`client_end=Eof
+upstream_end=Eof delivery_failed=false rejected=0 dropped=0`). Claude
+Code: two sessions (its MCP logs live under
+`%LOCALAPPDATA%\claude-cli-nodejs\Cache\<project>\mcp-logs-<server>\`),
+both offering and negotiating 2025-11-25. Upstream in all sessions:
 `secure-filesystem-server` 0.2.0 via `npx.cmd`.
 
 Current pin: **2025-11-25**.
