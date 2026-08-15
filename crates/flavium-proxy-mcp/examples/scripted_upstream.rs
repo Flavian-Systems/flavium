@@ -6,7 +6,7 @@
 //!     target/debug/examples/scripted_upstream
 //! ```
 //!
-//! It answers `initialize` (protocol version 2025-06-18), `tools/list`
+//! It answers `initialize` (protocol version 2025-11-25), `tools/list`
 //! (one `echo` tool), and `tools/call` (echoes the params back), and
 //! returns method-not-found for any other request. It exits cleanly
 //! when its stdin closes.
@@ -37,7 +37,7 @@ fn main() {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": "2025-11-25",
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "scripted-upstream", "version": "0.0.0" }
                 }

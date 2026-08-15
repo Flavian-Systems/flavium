@@ -11,9 +11,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// See docs/tasks/v0.1/T1-m1-demo.md; keep in sync with the
+/// Recorded live from the M1 Claude Desktop demo on 2026-08-15 — see
+/// docs/tasks/v0.1/T1-m1-demo.md; keep in sync with the
 /// scripted_upstream example and the scripted-session tests.
-const PINNED_PROTOCOL_VERSION: &str = "2025-06-18";
+const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// The scripted_upstream example binary, built by `cargo test` alongside
 /// this test (test executables live in `target/<profile>/deps`).
@@ -129,7 +130,7 @@ fn full_session_through_real_processes() {
 
     // initialize
     proxy.send(
-        r#"{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e-test", "version": "0"}}}"#,
+        r#"{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "e2e-test", "version": "0"}}}"#,
     );
     let init = proxy.recv();
     assert_eq!(init["id"], 0);

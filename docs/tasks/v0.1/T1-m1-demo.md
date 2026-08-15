@@ -34,15 +34,15 @@ second real client).
 
 ## Checklist
 
-- [ ] The `filesystem` server shows as connected; its tools are listed.
-- [ ] A chat request that reads a file (e.g. "list what's on my
+- [x] The `filesystem` server shows as connected; its tools are listed.
+- [x] A chat request that reads a file (e.g. "list what's on my
       Desktop") round-trips through flavium and succeeds.
-- [ ] Claude Desktop's MCP log for the server
+- [x] Claude Desktop's MCP log for the server
       (`%APPDATA%\Claude\logs\mcp-server-filesystem.log` on Windows,
       `~/Library/Logs/Claude/` on macOS) contains flavium's
       `observed initialize request` and `MCP handshake complete` lines —
       the latter records the **negotiated protocol version**.
-- [ ] Quitting Claude Desktop leaves no orphan `flavium` or server
+- [x] Quitting Claude Desktop leaves no orphan `flavium` or server
       processes behind.
 - [ ] Repeat the connect + tool-call steps with Claude Code as a second
       real client: `claude mcp add filesystem -- <same command line>`.
@@ -57,6 +57,10 @@ example together, in the same PR as this file.
 
 | Date | Client | Client version | Negotiated protocol version |
 |---|---|---|---|
-| _pending first run_ | Claude Desktop | — | — |
+| 2026-08-15 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
 
-Current pin: **2025-06-18**.
+Two sessions observed, both clean (`client_end=Eof upstream_end=Eof
+delivery_failed=false rejected=0 dropped=0`); upstream
+`secure-filesystem-server` 0.2.0 via `npx.cmd`.
+
+Current pin: **2025-11-25**.

@@ -19,22 +19,22 @@ use flavium_proxy_mcp::proxy::{self, ClientPumpEnd, ProxyConfig, ProxySummary, U
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::task::JoinHandle;
 
-/// The MCP protocol version the scripted session is pinned to — the
-/// current MCP spec revision, provisional until the live-observed value
-/// is recorded in docs/tasks/v0.1/T1-m1-demo.md. Update the pin, the
-/// demo doc, proxy_e2e.rs, and the scripted_upstream example together
-/// if the real client negotiates something newer.
-const PINNED_PROTOCOL_VERSION: &str = "2025-06-18";
+/// The MCP protocol version the scripted session is pinned to —
+/// recorded live from the M1 Claude Desktop demo on 2026-08-15 (see
+/// docs/tasks/v0.1/T1-m1-demo.md). Update the pin, the demo doc,
+/// proxy_e2e.rs, and the scripted_upstream example together if the
+/// real client negotiates something newer.
+const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 
 const INIT_REQUEST: &str = concat!(
     r#"{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"#,
-    r#""protocolVersion": "2025-06-18", "capabilities": {"roots": {"listChanged": true}}, "#,
+    r#""protocolVersion": "2025-11-25", "capabilities": {"roots": {"listChanged": true}}, "#,
     r#""clientInfo": {"name": "scripted-client", "version": "9.9.9"}, "#,
     r#""_meta": {"trace": "abc"}, "unknown_extension": [1, 2.5, null, {"deep": true}]}}"#
 );
 
 const INIT_RESPONSE: &str = concat!(
-    r#"{"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": "2025-06-18", "#,
+    r#"{"jsonrpc": "2.0", "id": 0, "result": {"protocolVersion": "2025-11-25", "#,
     r#""capabilities": {"tools": {"listChanged": true}, "experimental": {"future": 1}}, "#,
     r#""serverInfo": {"name": "scripted-upstream", "version": "0.0.0"}, "#,
     r#""unknown_result_field": {"nested": [true, null]}}}"#
