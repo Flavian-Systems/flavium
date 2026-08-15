@@ -9,9 +9,11 @@ second real client).
 Since M2 the proxy **terminates MCP on both faces** (see
 [docs/GLOSSARY.md](../../GLOSSARY.md)): flavium answers the client's
 `initialize` itself and separately initializes each upstream. Two
-visible consequences for this checklist: Claude Desktop sees
-`serverInfo.name: "flavium"` (no longer the upstream's own name), and
-there are *two* handshakes to verify in the log instead of one.
+consequences for this checklist: the `initialize` response now carries
+`serverInfo.name: "flavium"` instead of the upstream's own name (on the
+wire only — Claude Desktop's UI shows the config entry name regardless;
+see *Checking the wire directly* below), and there are *two* handshakes
+to verify in the log instead of one.
 
 ## Setup
 
@@ -42,13 +44,13 @@ there are *two* handshakes to verify in the log instead of one.
 
 ## Checklist
 
-- [ ] The `filesystem` server shows as connected; its tools are listed.
+- [x] The `filesystem` server shows as connected; its tools are listed.
       (First connect may take a few seconds longer than M1: the proxy
       brings the upstream up and drains its `tools/list` *before*
       answering Claude Desktop's `initialize`.)
-- [ ] A chat request that reads a file (e.g. "list what's on my
+- [x] A chat request that reads a file (e.g. "list what's on my
       Desktop") round-trips through flavium and succeeds.
-- [ ] Claude Desktop's MCP log for the server
+- [x] Claude Desktop's MCP log for the server
       (`%APPDATA%\Claude\logs\mcp-server-filesystem.log` on Windows,
       `~/Library/Logs/Claude/` on macOS) shows both handshakes, in this
       order:
@@ -58,16 +60,106 @@ there are *two* handshakes to verify in the log instead of one.
       3. `answered client initialize` — the client-side handshake; its
          `negotiated_protocol_version` is the value to record below;
       4. `client session initialized`.
-- [ ] Quitting Claude Desktop leaves no orphan `flavium` or server
+- [x] Quitting Claude Desktop leaves no orphan `flavium` or server
       processes behind, and the log's final `session ended` line reads
       `end=ClientEof delivery_failed=false rejected=0 discarded=0`.
-- [ ] Repeat the connect + tool-call steps with Claude Code as a second
+- [x] Repeat the connect + tool-call steps with Claude Code as a second
       real client: `claude mcp add filesystem -- <same command line>`.
-- [ ] *(M2+, optional)* Multi-upstream: point the entry at a config file
-      instead — `"args": ["proxy", "--config", "<path>\\flavium.toml"]`
-      with two `[[upstream]]` entries — and check that both servers'
-      tools appear in one merged list and a call to each routes to the
-      right server.
+- [x] *(M2+)* Multi-upstream: point the entry at a config file instead
+      and check that both servers' tools appear in one merged list, that
+      a call to each routes to the right server, and that a deliberate
+      tool-name collision is refused. Worked example below.
+
+## Checking the wire directly
+
+Claude Desktop never displays `serverInfo` — its server list, tool
+picker, and its own log lines all use the entry name from
+`claude_desktop_config.json`. To see what the proxy actually answers,
+send one `initialize` frame by hand and read the first stdout line
+(no client needed; the upstream is spawned and reaped as usual):
+
+**cmd.exe** (works as is):
+
+```bat
+echo {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}} | target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>nul
+```
+
+**Windows PowerShell 5.1** — set the pipe encoding first, or the frame
+reaches the proxy re-encoded (BOM/OEM codepage) and is answered with a
+`-32700 Parse error`, which is the proxy correctly refusing a mangled
+frame, not a proxy bug:
+
+```powershell
+$OutputEncoding = New-Object Text.UTF8Encoding $false
+'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' | .\target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>$null | Select-Object -First 1
+```
+
+(macOS/Linux: the same `echo … | flavium proxy -- npx …` works in any
+shell.)
+
+Expected first line, observed 2026-08-15 against the M2 build:
+
+```json
+{"jsonrpc":"2.0","id":0,"result":{"capabilities":{"tools":{"listChanged":true}},"protocolVersion":"2025-11-25","serverInfo":{"name":"flavium","title":"Flavium MCP proxy","version":"0.1.0-alpha.0"}}}
+```
+
+On the M1 build the same command returned the upstream's own
+`serverInfo` (`secure-filesystem-server` 0.2.0) — that difference is
+the protocol termination made visible. The scripted tests pin the M2
+shape (`router_session.rs`, `proxy_e2e.rs`); MCP Inspector
+(`npx @modelcontextprotocol/inspector`) shows the same field in its
+Server Info panel if a GUI is preferred.
+
+## Multi-upstream variant
+
+Config file (e.g. `flavium.toml` at the repo root; TOML needs doubled
+backslashes). `server-memory` is a good second upstream: zero-config
+via `npx`, a completely different tool family, no name overlap with
+the filesystem server.
+
+```toml
+[[upstream]]
+name = "fs"
+command = ["npx.cmd", "-y", "@modelcontextprotocol/server-filesystem",
+           "C:\\Users\\flavi\\Desktop"]
+
+[[upstream]]
+name = "memory"
+command = ["npx.cmd", "-y", "@modelcontextprotocol/server-memory"]
+```
+
+Claude Desktop entry (name it `flavium` — the log file follows the
+entry name, so it lands in `mcp-server-flavium.log`):
+
+```json
+{
+  "mcpServers": {
+    "flavium": {
+      "command": "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\target\\release\\flavium.exe",
+      "args": ["proxy", "--config",
+               "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\flavium.toml"]
+    }
+  }
+}
+```
+
+**Success case.** The server connects with one merged list — the 14
+filesystem tools *and* the 9 memory tools (23 total). "List what's on
+my Desktop" routes to `fs`; "remember that my favorite editor is
+Neovim, then read back the whole knowledge graph" routes
+`create_entities` + `read_graph` to `memory`. The log shows two
+`upstream initialized` lines (`upstream="fs"` / `upstream="memory"`),
+`all upstreams initialized; serving the client upstreams=2 tools=23`,
+the usual client handshake, and a clean `session ended`. Quitting
+leaves none of the three processes behind.
+
+**Failure case (collision refusal).** Add a third block that duplicates
+`fs` under another name (`name = "fs2"`, same command) and restart.
+The server must show as failed/disconnected in Claude Desktop, and the
+log must contain
+`proxy failed: tool "read_file" is offered by both "fs" and "fs2"` —
+the proxy refuses ambiguous authority at startup rather than picking a
+winner. Remove the block afterwards.
 
 ## Negotiated protocol version — record here
 
@@ -85,18 +177,37 @@ example, and — if a new revision must be *accepted* — the supported
 set in `crates/flavium-proxy-mcp/src/protocol.rs`, together, in the
 same PR as this file.
 
-| Date | Client | Client version | Negotiated protocol version |
-|---|---|---|---|
-| 2026-08-15 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
-| 2026-08-15 | Claude Code (clientInfo `claude-code`) | 2.1.173, 2.1.233 | **2025-11-25** |
+| Date | Build | Client | Client version | Negotiated protocol version |
+|---|---|---|---|---|
+| 2026-08-15 | M1 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
+| 2026-08-15 | M1 | Claude Code (clientInfo `claude-code`) | 2.1.173, 2.1.233 | **2025-11-25** |
+| 2026-08-15 | M2 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
+| 2026-08-15 | M2 | Claude Code (clientInfo `claude-code`) | 2.1.233 | **2025-11-25** |
 
-The 2026-08-15 rows were recorded against the M1 (transparent) build:
-two Claude Desktop sessions and two Claude Code sessions, all clean,
-all offering and negotiating 2025-11-25; upstream in all sessions was
-`secure-filesystem-server` 0.2.0 via `npx.cmd`. (Claude Code's MCP
-logs live under
+M1 run: two Claude Desktop sessions and two Claude Code sessions, all
+clean, all offering and negotiating 2025-11-25.
+
+M2 run (the checklist as ticked above): two Claude Desktop sessions
+and two Claude Code sessions. Every session showed the four handshake
+lines in order; the upstream negotiated 2025-11-25 on its own face
+(`server_name="secure-filesystem-server" server_version="0.2.0"
+tools_declared=true`), 14 tools were merged, the client face offered
+and negotiated 2025-11-25, and both Claude Desktop sessions ended
+`end=ClientEof delivery_failed=false rejected=0 discarded=0` with no
+orphan processes. (Claude Code's MCP logs live under
 `%LOCALAPPDATA%\claude-cli-nodejs\Cache\<project>\mcp-logs-<server>\`.)
-The checklist above has not yet been re-run against the M2 build —
-append a row when it is.
+
+Single-upstream sessions to date: `secure-filesystem-server` 0.2.0 via
+`npx.cmd`.
+
+Multi-upstream variant, run 2026-08-15 on Claude Desktop against the
+M2 build: success case — `fs` (secure-filesystem-server 0.2.0) +
+`memory` (memory-server 0.6.3), both negotiating 2025-11-25, 23 tools
+merged, two clean sessions (`end=ClientEof … rejected=0 discarded=0`,
+one with three routed calls), no orphans; failure case — with a
+duplicate `fs2` block, all three upstreams initialized and the proxy
+then refused service with
+`proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
+Claude Desktop reporting the server disconnected.
 
 Current pin: **2025-11-25**.

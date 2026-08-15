@@ -26,3 +26,5 @@ Cargo.lock
 *.sqlite
 .DS_Store
 /dist
+# Local proxy config used for manual demos (contains machine paths / may hold secrets)
+/flavium.toml
