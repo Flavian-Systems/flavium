@@ -321,7 +321,7 @@ async fn full_session_merges_routes_and_translates_byte_faithfully() {
 
     // tools/call routed to upstream-0: id rewritten into the proxy's
     // minted space, params and unknown members byte-identical.
-    let call_params = "{\"name\": \"read_file\", \"arguments\": {\"path\": \"/data/x\", \"n\": 2.50, \"u\": \"h\u{e9}llo\"}}";
+    let call_params = "{\"name\": \"read_file\", \"arguments\": {\"path\": \"/data/x\", \"n\": 2.50, \"u\": \"h\u{e9}llo\"}, \"_meta\": {\"progressToken\": \"tok-alpha\"}}";
     h.client
         .send(&format!(
             r#"{{"jsonrpc": "2.0", "id": "call-1", "method": "tools/call", "params": {call_params}, "_meta": {{"trace": true}}}}"#
@@ -346,8 +346,19 @@ async fn full_session_merges_routes_and_translates_byte_faithfully() {
         "the client's id must not leak upstream"
     );
 
+    // While the call is in flight: progress with its token passes
+    // through byte-identically; progress with the same token from the
+    // *other* upstream (which was never sent it) is dropped.
+    let progress = r#"{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "tok-alpha", "progress":  0.5}}"#;
+    h.upstreams[0].send(progress).await;
+    assert_eq!(h.client.recv().await, progress.as_bytes());
+    h.upstreams[1]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "tok-alpha", "progress": 0.9, "message": "spoofed"}}"#)
+        .await;
+
     // The response comes back under the client's original id bytes,
-    // result body untouched.
+    // result body untouched — and it is the next thing the client
+    // sees, proving the spoofed progress never crossed.
     let result_raw = r#"{"content": [{"type": "text", "text": "ok  spaced"}], "extra": [1e1]}"#;
     h.upstreams[0]
         .send(&format!(
@@ -377,11 +388,6 @@ async fn full_session_merges_routes_and_translates_byte_faithfully() {
         ))
         .await;
     assert_eq!(h.client.recv_json().await["id"], 7);
-
-    // Progress notifications pass through byte-identically.
-    let progress = r#"{"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "call-1-tok", "progress":  0.5}}"#;
-    h.upstreams[0].send(progress).await;
-    assert_eq!(h.client.recv().await, progress.as_bytes());
 
     // The denial surface, pinned: unknown tool, foreign cursor,
     // unadvertised method, and ping answered by the proxy itself.
@@ -643,6 +649,12 @@ async fn cancellation_is_translated_and_late_responses_are_dropped() {
 
     let summary = finish(h).await;
     assert!(summary.clean_shutdown());
+    // Deterministic drop proof, independent of delivery ordering: the
+    // client was sent exactly the init reply and two pongs — the late
+    // response is nowhere in the count.
+    assert_eq!(summary.frames_to_client, 3);
+    assert_eq!(summary.frames_to_upstream, 2, "one call + one cancel");
+    assert_eq!(summary.client_frames_discarded, 1, "the unknown-id cancel");
 }
 
 #[tokio::test]
@@ -867,6 +879,9 @@ async fn upstream_responses_with_unknown_ids_are_dropped() {
 
     let summary = finish(h).await;
     assert!(summary.clean_shutdown());
+    // Exactly the init reply and the pong reached the client; none of
+    // the forged frames are in the count.
+    assert_eq!(summary.frames_to_client, 2);
 }
 
 #[tokio::test]
@@ -892,6 +907,350 @@ async fn upstream_requests_are_refused_and_pings_answered() {
     let pong = h.upstreams[0].recv_json().await;
     assert_eq!(pong["id"], 901);
     assert_eq!(pong["result"], serde_json::json!({}));
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+}
+
+#[tokio::test]
+async fn colliding_minted_ids_stay_scoped_to_their_upstreams() {
+    // Both upstreams mint the same integer ids (init=0, list=1, first
+    // call=2); responses arriving interleaved must resolve inside each
+    // connection, never across.
+    let mut h = spawn_router(test_config(), 2);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    boot_upstream(&mut h.upstreams[1], "beta-server", None).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "alpha_tool", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+    answer_tools_list(
+        &mut h.upstreams[1],
+        None,
+        r#"{"tools": [{"name": "beta_tool", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+    client_handshake(&mut h).await;
+
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": "for-alpha", "method": "tools/call", "params": {"name": "alpha_tool", "arguments": {}}}"#)
+        .await;
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": "for-beta", "method": "tools/call", "params": {"name": "beta_tool", "arguments": {}}}"#)
+        .await;
+    let alpha_seen = h.upstreams[0].recv_json().await;
+    let beta_seen = h.upstreams[1].recv_json().await;
+    let alpha_id = alpha_seen["id"].as_i64().unwrap();
+    let beta_id = beta_seen["id"].as_i64().unwrap();
+    assert_eq!(
+        alpha_id, beta_id,
+        "the fixture depends on the minted ids colliding; fix the setup if this fails"
+    );
+
+    // Answer in reverse order with distinguishable bodies.
+    h.upstreams[1]
+        .send(&format!(
+            r#"{{"jsonrpc": "2.0", "id": {beta_id}, "result": {{"content": [{{"type": "text", "text": "from-beta"}}]}}}}"#
+        ))
+        .await;
+    let first = h.client.recv_json().await;
+    assert_eq!(first["id"], "for-beta");
+    assert_eq!(first["result"]["content"][0]["text"], "from-beta");
+
+    h.upstreams[0]
+        .send(&format!(
+            r#"{{"jsonrpc": "2.0", "id": {alpha_id}, "result": {{"content": [{{"type": "text", "text": "from-alpha"}}]}}}}"#
+        ))
+        .await;
+    let second = h.client.recv_json().await;
+    assert_eq!(second["id"], "for-alpha");
+    assert_eq!(second["result"]["content"][0]["text"], "from-alpha");
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+}
+
+#[tokio::test]
+async fn out_of_policy_notifications_are_dropped_both_ways() {
+    let mut h = spawn_router(test_config(), 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+    client_handshake(&mut h).await;
+
+    // Upstream notifications for capabilities the proxy never
+    // advertised stop at the proxy.
+    h.upstreams[0]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "leak?"}}"#)
+        .await;
+    h.upstreams[0]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": "file:///x"}}"#)
+        .await;
+
+    // Client notifications the proxy does not model reach no upstream.
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}"#)
+        .await;
+
+    // Ordering proof in both directions: the next upstream-bound frame
+    // is the call, the next client-bound frame is its response.
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}"#)
+        .await;
+    let forwarded = h.upstreams[0].recv_json().await;
+    assert_eq!(forwarded["method"], "tools/call");
+    let uid = forwarded["id"].as_i64().unwrap();
+    h.upstreams[0]
+        .send(&format!(
+            r#"{{"jsonrpc": "2.0", "id": {uid}, "result": {{"content": []}}}}"#
+        ))
+        .await;
+    assert_eq!(h.client.recv_json().await["id"], 1);
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+    assert_eq!(summary.client_frames_discarded, 1, "the roots notification");
+    assert_eq!(summary.frames_to_upstream, 1, "only the call crossed");
+    assert_eq!(
+        summary.frames_to_client, 2,
+        "only the init reply and the call response crossed"
+    );
+}
+
+#[tokio::test]
+async fn runaway_pagination_refuses_service() {
+    let mut h = spawn_router(test_config(), 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    // The upstream echoes the same cursor forever.
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [], "nextCursor": "loop"}"#,
+    )
+    .await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        Some("loop"),
+        r#"{"tools": [], "nextCursor": "loop"}"#,
+    )
+    .await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), h.router)
+        .await
+        .expect("router did not fail startup")
+        .expect("router task panicked");
+    assert!(
+        matches!(
+            result,
+            Err(RunError::Startup(StartupError::List {
+                source: router::ListError::RunawayPagination,
+                ..
+            }))
+        ),
+        "expected runaway pagination, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_tool_bytes_refuse_service() {
+    let config = ProxyConfig {
+        max_frame_bytes: 1024,
+        ..test_config()
+    };
+    let mut h = spawn_router(config, 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    // Two pages, each under the frame cap, together over the byte
+    // budget: page/count caps alone would admit this.
+    let fat_tool = |name: &str| {
+        format!(
+            r#"{{"tools": [{{"name": "{name}", "description": "{}", "inputSchema": {{"type": "object"}}}}], "nextCursor": "p2"}}"#,
+            "x".repeat(600)
+        )
+    };
+    let page_one = fat_tool("a");
+    answer_tools_list(&mut h.upstreams[0], None, &page_one).await;
+    let page_two = fat_tool("b").replace(r#", "nextCursor": "p2""#, "");
+    answer_tools_list(&mut h.upstreams[0], Some("p2"), &page_two).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), h.router)
+        .await
+        .expect("router did not fail startup")
+        .expect("router task panicked");
+    assert!(
+        matches!(
+            result,
+            Err(RunError::Startup(StartupError::List {
+                source: router::ListError::TooManyBytes,
+                ..
+            }))
+        ),
+        "expected a byte-budget refusal, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn relist_failure_keeps_the_previous_table() {
+    let mut h = spawn_router(test_config(), 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+    client_handshake(&mut h).await;
+
+    // The upstream announces a change but errors the re-list.
+    h.upstreams[0]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}"#)
+        .await;
+    let relist = h.upstreams[0].recv_json().await;
+    assert_eq!(relist["method"], "tools/list");
+    let relist_id = relist["id"].as_i64().unwrap();
+    h.upstreams[0]
+        .send(&format!(
+            r#"{{"jsonrpc": "2.0", "id": {relist_id}, "error": {{"code": -32603, "message": "registry reloading"}}}}"#
+        ))
+        .await;
+
+    // The session survives and the old table still serves; the first
+    // frame after the failure is the pong — no list_changed was
+    // emitted for a change the proxy could not verify.
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 1, "method": "ping"}"#)
+        .await;
+    assert_eq!(h.client.recv_json().await["id"], 1);
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}"#)
+        .await;
+    let list = h.client.recv_json().await;
+    assert_eq!(list["result"]["tools"][0]["name"], "echo");
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+    assert_eq!(
+        summary.frames_to_client, 3,
+        "init reply, pong, list — and no list_changed"
+    );
+}
+
+#[tokio::test]
+async fn oversized_client_frame_is_answered_and_session_survives() {
+    let config = ProxyConfig {
+        max_frame_bytes: 1024,
+        ..test_config()
+    };
+    let mut h = spawn_router(config, 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    answer_tools_list(&mut h.upstreams[0], None, r#"{"tools": []}"#).await;
+    client_handshake(&mut h).await;
+
+    let mut oversized = vec![b'x'; 4096];
+    oversized.push(b'\n');
+    h.client.send_raw(&oversized).await;
+    let reply = h.client.recv_json().await;
+    assert!(reply["id"].is_null());
+    assert_eq!(reply["error"]["code"], -32700);
+
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 1, "method": "ping"}"#)
+        .await;
+    assert_eq!(h.client.recv_json().await["id"], 1);
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+    assert_eq!(summary.client_frames_rejected, 1);
+}
+
+#[tokio::test]
+async fn invalid_params_denials_are_pinned() {
+    let mut h = spawn_router(test_config(), 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+
+    // initialize with unreadable params, then without protocolVersion:
+    // each refused with -32602, neither advances the handshake.
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": 42}"#)
+        .await;
+    let bad = h.client.recv_json().await;
+    assert_eq!(bad["id"], 1);
+    assert_eq!(bad["error"]["code"], -32602);
+
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"capabilities": {}, "clientInfo": {"name": "c", "version": "0"}}}"#)
+        .await;
+    let missing = h.client.recv_json().await;
+    assert_eq!(missing["id"], 2);
+    assert_eq!(missing["error"]["code"], -32602);
+
+    // The real handshake still works afterwards.
+    client_handshake(&mut h).await;
+
+    // tools/call without a name is refused with the same shape.
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"arguments": {}}}"#)
+        .await;
+    let nameless = h.client.recv_json().await;
+    assert_eq!(nameless["id"], 3);
+    assert_eq!(nameless["error"]["code"], -32602);
+
+    let summary = finish(h).await;
+    assert!(summary.clean_shutdown());
+}
+
+#[tokio::test]
+async fn pre_ready_list_changed_is_flushed_after_initialized() {
+    let mut h = spawn_router(test_config(), 1);
+    boot_upstream(&mut h.upstreams[0], "alpha-server", None).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+
+    // The upstream's tools change before the client has even sent
+    // initialize; no server-originated frame may cross yet.
+    h.upstreams[0]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}"#)
+        .await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}, {"name": "late_tool", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+
+    // The first client-bound frame is the initialize reply, the second
+    // is the flushed list_changed after initialized.
+    let init = client_handshake(&mut h).await;
+    assert!(init.get("result").is_some());
+    let note = h.client.recv_json().await;
+    assert_eq!(note["method"], "notifications/tools/list_changed");
+
+    h.client
+        .send(r#"{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}"#)
+        .await;
+    let list = h.client.recv_json().await;
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["echo", "late_tool"]);
 
     let summary = finish(h).await;
     assert!(summary.clean_shutdown());

@@ -34,6 +34,10 @@ const SESSION_ID: &str = "sess-0123456789abcdef";
 const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 
 struct ServerState {
+    /// Lifecycle gate: set once notifications/initialized arrives; any
+    /// non-ping request before that is refused, like a stateful
+    /// spec-following server would.
+    initialized: AtomicBool,
     /// Kill switch: every request answers 404, as an expired session.
     expired: AtomicBool,
     /// Fail the next tools/call POST with a 500.
@@ -55,6 +59,7 @@ impl ServerState {
     fn new() -> Arc<Self> {
         let (notify, _) = broadcast::channel(16);
         Arc::new(Self {
+            initialized: AtomicBool::new(false),
             expired: AtomicBool::new(false),
             fail_next_call: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
@@ -112,9 +117,30 @@ async fn post_handler(
 
     let id = message.get("id").cloned();
     let Some(id) = id else {
+        if method == Some("notifications/initialized") {
+            state.initialized.store(true, Ordering::SeqCst);
+        }
         // A notification (or response): accepted, no body.
         return StatusCode::ACCEPTED.into_response();
     };
+
+    // The lifecycle gate the MCP spec implies for stateful servers: no
+    // requests (pings aside) before initialized. If the proxy's
+    // ordering ever regresses — e.g. the initialized POST racing the
+    // first tools/list — this makes the whole suite fail loudly.
+    if !is_initialize && method != Some("ping") && !state.initialized.load(Ordering::SeqCst) {
+        let reply = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32002, "message": "Server not initialized" }
+        });
+        return (
+            StatusCode::OK,
+            [("Content-Type", "application/json")],
+            reply.to_string(),
+        )
+            .into_response();
+    }
 
     match method {
         Some("initialize") => {
@@ -350,8 +376,10 @@ async fn full_session_over_streamable_http() {
     assert_eq!(reply["result"]["content"][0]["text"], "called http_echo");
 
     // SSE tools/call: progress passes through first, then the result.
+    // The call carries the progress token the server will reference —
+    // the proxy forwards progress only for tokens it actually sent.
     client
-        .send(r#"{"jsonrpc": "2.0", "id": "c2", "method": "tools/call", "params": {"name": "sse_tool", "arguments": {}}}"#)
+        .send(r#"{"jsonrpc": "2.0", "id": "c2", "method": "tools/call", "params": {"name": "sse_tool", "arguments": {}, "_meta": {"progressToken": "http-tok"}}}"#)
         .await;
     let progress = client.recv().await;
     assert_eq!(progress["method"], "notifications/progress");

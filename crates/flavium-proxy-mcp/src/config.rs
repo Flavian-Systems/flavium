@@ -37,16 +37,17 @@ pub enum TransportSpec {
     },
 }
 
-/// Header **values** are secrets (`Authorization` bearer tokens); they
-/// must never reach logs, so the derived representation is replaced
-/// with one that redacts them.
+/// Header **values** are secrets (`Authorization` bearer tokens), and
+/// URLs can embed credentials in userinfo or query strings; neither
+/// must ever reach logs, so the derived representation is replaced with
+/// one that redacts both.
 impl fmt::Debug for TransportSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stdio { command } => f.debug_struct("Stdio").field("command", command).finish(),
             Self::Http { url, headers } => f
                 .debug_struct("Http")
-                .field("url", url)
+                .field("url", &redact_url(url))
                 .field(
                     "headers",
                     &headers
@@ -56,6 +57,28 @@ impl fmt::Debug for TransportSpec {
                 )
                 .finish(),
         }
+    }
+}
+
+/// A display-safe rendering of a configured URL: scheme, host, port,
+/// and path only. Userinfo and query strings — where hosted endpoints
+/// put credentials — are stripped, so this form is the only one that
+/// may appear in logs or error messages.
+pub fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => {
+            let mut out = format!("{}://", parsed.scheme());
+            out.push_str(parsed.host_str().unwrap_or(""));
+            if let Some(port) = parsed.port() {
+                out.push(':');
+                out.push_str(&port.to_string());
+            }
+            out.push_str(parsed.path());
+            out
+        }
+        // An unparseable URL could hide anything; identify the
+        // upstream by name instead of echoing the string.
+        Err(_) => "<unparseable url>".to_owned(),
     }
 }
 
@@ -92,7 +115,8 @@ pub enum ConfigError {
     BadUrl {
         /// The offending upstream.
         name: String,
-        /// The URL as configured.
+        /// The URL in redacted form (never the configured bytes, which
+        /// may embed credentials).
         url: String,
     },
 }
@@ -127,7 +151,7 @@ pub fn validate(specs: &[UpstreamSpec]) -> Result<(), ConfigError> {
                 if !scheme_ok {
                     return Err(ConfigError::BadUrl {
                         name: spec.name.clone(),
-                        url: url.clone(),
+                        url: redact_url(url),
                     });
                 }
             }
@@ -192,12 +216,16 @@ mod tests {
 
     #[test]
     fn rejects_non_http_urls() {
-        for bad in ["ftp://x/", "file:///etc", "not a url", "ws://x/"] {
+        for (bad, redacted) in [
+            ("ftp://x/", "ftp://x/"),
+            ("not a url", "<unparseable url>"),
+            ("ws://x/", "ws://x/"),
+        ] {
             assert_eq!(
                 validate(&[http("a", bad)]),
                 Err(ConfigError::BadUrl {
                     name: "a".into(),
-                    url: bad.into()
+                    url: redacted.into()
                 }),
                 "url {bad:?}"
             );
@@ -205,17 +233,32 @@ mod tests {
     }
 
     #[test]
-    fn debug_output_redacts_header_values() {
+    fn redact_url_strips_userinfo_and_query() {
+        assert_eq!(
+            redact_url("https://user:tok3n@example.com:8443/mcp?api_key=SECRET#frag"),
+            "https://example.com:8443/mcp"
+        );
+        assert_eq!(
+            redact_url("http://127.0.0.1:8080/mcp"),
+            "http://127.0.0.1:8080/mcp"
+        );
+        assert_eq!(redact_url("%%%"), "<unparseable url>");
+    }
+
+    #[test]
+    fn debug_output_redacts_header_values_and_url_secrets() {
         let spec = UpstreamSpec {
             name: "web".into(),
             transport: TransportSpec::Http {
-                url: "https://example.com/mcp".into(),
+                url: "https://example.com/mcp?api_key=url-secret".into(),
                 headers: vec![("Authorization".into(), "Bearer super-secret".into())],
             },
         };
         let debug = format!("{spec:?}");
         assert!(!debug.contains("super-secret"), "leaked: {debug}");
+        assert!(!debug.contains("url-secret"), "leaked: {debug}");
         assert!(debug.contains("Authorization"));
         assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("https://example.com/mcp"));
     }
 }

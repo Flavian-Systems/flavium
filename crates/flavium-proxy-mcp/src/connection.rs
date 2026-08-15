@@ -13,6 +13,13 @@
 //! is a [`Command`]. Responses to forwarded client requests come back
 //! with the client's original id bytes already restored — the router
 //! never touches upstream ids.
+//!
+//! Progress notifications are scoped the same way responses are: the
+//! actor records each forwarded request's `_meta.progressToken` and
+//! forwards `notifications/progress` only for tokens it actually sent
+//! to *this* upstream — an upstream cannot inject progress (or its
+//! free-text `message`) into another upstream's calls by guessing
+//! tokens.
 
 use std::time::Duration;
 
@@ -187,11 +194,35 @@ pub struct Handle {
     commands: mpsc::Sender<Command>,
 }
 
+/// Why [`Handle::try_send`] refused a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendRefusal {
+    /// The actor's queue is full — backpressure. The caller must not
+    /// wait for space: the router blocking on an actor queue while the
+    /// actor blocks on the router's event queue is a deadlock cycle.
+    Busy,
+    /// The actor is gone; its Fatal/Ended event is already in flight.
+    Closed,
+}
+
 impl Handle {
     /// Queues a command; an error means the actor is gone, which the
     /// router will learn (or already has) via a Fatal/Ended event.
+    ///
+    /// This *waits* for queue space, so it must never be called from
+    /// the router's serve loop — that is what [`Handle::try_send`] is
+    /// for. It is safe from independent tasks (startup, re-lists).
     pub async fn send(&self, command: Command) -> Result<(), ()> {
         self.commands.send(command).await.map_err(|_| ())
+    }
+
+    /// Queues a command without waiting for space — the serve loop's
+    /// only way to talk to an actor.
+    pub fn try_send(&self, command: Command) -> Result<(), SendRefusal> {
+        self.commands.try_send(command).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(_) => SendRefusal::Busy,
+            mpsc::error::TrySendError::Closed(_) => SendRefusal::Closed,
+        })
     }
 
     /// Runs one proxy-internal request to completion with a deadline.
@@ -302,6 +333,8 @@ pub async fn connect(
         transport,
         pending,
         events,
+        progress_tokens: std::collections::HashMap::new(),
+        token_counts: std::collections::HashMap::new(),
     };
     let join = tokio::spawn(actor.run(commands_rx));
     Ok((
@@ -342,9 +375,11 @@ async fn initialize(
         )
         .await?;
 
-    // Read until the initialize response; anything else a server emits
-    // this early is dropped with a log line (it has not been told the
-    // session is initialized, so nothing it sends can be load-bearing).
+    // Read until the initialize response. Pings are answered even in
+    // this window — the spec allows pre-initialized server pings, and a
+    // keepalive-checking server must not conclude the proxy is dead
+    // while a slow sibling command starts up. Anything else a server
+    // emits this early is dropped with a log line.
     let result_raw: Box<RawValue> = loop {
         match transport.recv().await? {
             None => return Err(ConnectError::ClosedDuringInit),
@@ -366,6 +401,14 @@ async fn initialize(
                     // exactly one of result/error.
                     _ => return Err(ConnectError::BadInitializeResult),
                 },
+                Ok(Message::Request { id, method, .. }) if method == "ping" => {
+                    transport
+                        .send(
+                            builder::result_frame(&builder::encode_id(&id), "{}"),
+                            SendContext::FireAndForget,
+                        )
+                        .await?;
+                }
                 Ok(other) => {
                     debug!(
                         upstream = name,
@@ -389,8 +432,13 @@ async fn initialize(
     }
 
     transport.set_protocol_version(&parsed.protocol_version);
+    // Ordered on purpose: the lifecycle requires `initialized` to reach
+    // the server before any subsequent request, and over streamable
+    // HTTP an ordinary send is a detached POST that could lose that
+    // race. A refused `initialized` fails the connection instead of
+    // being logged away.
     transport
-        .send(
+        .send_ordered(
             builder::notification_frame("notifications/initialized", None),
             SendContext::FireAndForget,
         )
@@ -433,12 +481,74 @@ fn message_kind(message: &Message<'_>) -> &'static str {
     }
 }
 
+/// A progress token as the client minted it: an integer or a string.
+/// Fractional or otherwise exotic tokens are treated as absent (fail
+/// closed: their progress is dropped).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProgressToken {
+    Number(i64),
+    Text(String),
+}
+
+fn value_to_token(value: serde_json::Value) -> Option<ProgressToken> {
+    match value {
+        serde_json::Value::Number(n) => n.as_i64().map(ProgressToken::Number),
+        serde_json::Value::String(s) => Some(ProgressToken::Text(s)),
+        _ => None,
+    }
+}
+
+/// The `_meta.progressToken` of a request frame, if any.
+fn request_progress_token(frame: &[u8]) -> Option<ProgressToken> {
+    #[derive(Deserialize)]
+    struct FrameWire {
+        #[serde(default)]
+        params: Option<ParamsWire>,
+    }
+    #[derive(Deserialize)]
+    struct ParamsWire {
+        #[serde(rename = "_meta", default)]
+        meta: Option<MetaWire>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MetaWire {
+        #[serde(default)]
+        progress_token: Option<serde_json::Value>,
+    }
+    let parsed: FrameWire = serde_json::from_slice(frame).ok()?;
+    value_to_token(parsed.params?.meta?.progress_token?)
+}
+
+/// The `progressToken` of a progress notification frame, if any.
+fn notification_progress_token(frame: &[u8]) -> Option<ProgressToken> {
+    #[derive(Deserialize)]
+    struct FrameWire {
+        #[serde(default)]
+        params: Option<ParamsWire>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ParamsWire {
+        #[serde(default)]
+        progress_token: Option<serde_json::Value>,
+    }
+    let parsed: FrameWire = serde_json::from_slice(frame).ok()?;
+    value_to_token(parsed.params?.progress_token?)
+}
+
 struct Actor {
     upstream: usize,
     name: String,
     transport: Transport,
     pending: PendingMap<oneshot::Sender<Result<Box<RawValue>, CallError>>>,
     events: mpsc::Sender<Event>,
+    /// `_meta.progressToken` of each in-flight forwarded request, by
+    /// minted id — the scope check for upstream progress notifications.
+    progress_tokens: std::collections::HashMap<u64, ProgressToken>,
+    /// How many in-flight requests carry each token (clients should
+    /// make them unique, but the proxy does not rely on that).
+    token_counts: std::collections::HashMap<ProgressToken, usize>,
 }
 
 impl Actor {
@@ -509,6 +619,10 @@ impl Actor {
                     });
                 match rewritten {
                     Ok(rewritten) => {
+                        if let Some(token) = request_progress_token(&frame) {
+                            self.progress_tokens.insert(upstream_id, token.clone());
+                            *self.token_counts.entry(token).or_insert(0) += 1;
+                        }
                         self.send_upstream(
                             rewritten.into_bytes(),
                             SendContext::Request { upstream_id },
@@ -541,6 +655,7 @@ impl Actor {
                     debug!(upstream = %self.name, "cancellation for a request not in flight; dropped");
                     return Ok(());
                 };
+                self.release_token(upstream_id);
                 match rewrite_cancel(&frame, upstream_id) {
                     Ok(rewritten) => {
                         self.send_upstream(rewritten, SendContext::FireAndForget)
@@ -605,7 +720,11 @@ impl Actor {
                     result.map(RawValue::to_owned),
                     error.map(RawValue::to_owned),
                 );
-                match self.pending.complete(n as u64) {
+                let completed = self.pending.complete(n as u64);
+                if completed.is_some() {
+                    self.release_token(n as u64);
+                }
+                match completed {
                     Some(Pending::Client {
                         client_id,
                         client_id_raw,
@@ -669,6 +788,15 @@ impl Actor {
                     .await
                 }
                 "notifications/progress" => {
+                    // Scope check: only tokens this actor actually sent
+                    // upstream may produce progress toward the client —
+                    // the same containment responses get via minted ids.
+                    let known = notification_progress_token(&frame)
+                        .is_some_and(|token| self.token_counts.contains_key(&token));
+                    if !known {
+                        debug!(upstream = %self.name, "progress for a token not in flight here; dropped");
+                        return Ok(());
+                    }
                     self.emit(Event::Notification {
                         upstream: self.upstream,
                         frame,
@@ -702,6 +830,18 @@ impl Actor {
                     return Err(());
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// Forgets a completed/cancelled request's progress token.
+    fn release_token(&mut self, upstream_id: u64) {
+        if let Some(token) = self.progress_tokens.remove(&upstream_id) {
+            if let Some(count) = self.token_counts.get_mut(&token) {
+                *count -= 1;
+                if *count == 0 {
+                    self.token_counts.remove(&token);
+                }
             }
         }
     }
@@ -751,6 +891,36 @@ mod tests {
         let no_request_id =
             br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"reason":"x"}}"#;
         assert!(rewrite_cancel(no_request_id, 1).is_err());
+    }
+
+    #[test]
+    fn progress_tokens_parse_from_requests_and_notifications() {
+        let frame = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{},"_meta":{"progressToken":"tok-1"}}}"#;
+        assert_eq!(
+            request_progress_token(frame),
+            Some(ProgressToken::Text("tok-1".into()))
+        );
+        let frame = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","_meta":{"progressToken":7}}}"#;
+        assert_eq!(
+            request_progress_token(frame),
+            Some(ProgressToken::Number(7))
+        );
+        let no_token = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t"}}"#;
+        assert_eq!(request_progress_token(no_token), None);
+        // Fractional tokens are treated as absent (their progress will
+        // be dropped — fail closed).
+        let float_token =
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progressToken":1.5}}}"#;
+        assert_eq!(request_progress_token(float_token), None);
+
+        let note = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":0.5}}"#;
+        assert_eq!(
+            notification_progress_token(note),
+            Some(ProgressToken::Text("tok-1".into()))
+        );
+        let tokenless =
+            br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":0.5}}"#;
+        assert_eq!(notification_progress_token(tokenless), None);
     }
 
     #[test]

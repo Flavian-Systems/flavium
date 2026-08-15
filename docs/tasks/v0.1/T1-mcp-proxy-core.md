@@ -2,7 +2,11 @@
 
 Status: **approved 2026-08-14** — includes the dependency-approval list
 below (flavium-core: none; flavium-policy: cedar-policy, serde_json,
-thiserror).
+thiserror). Progress: M1 landed 2026-08-15 (#1, demo checklist in
+`T1-m1-demo.md`); M2 followed — one deviation from the plan's crate
+list: `eventsource-stream` was not adopted (the SSE parser is
+hand-rolled next to the framing, as a bounded, fuzz-ready seam), and
+`futures-util` + `axum` (dev-only) were added alongside `reqwest`.
 
 ## Goal & non-goals
 

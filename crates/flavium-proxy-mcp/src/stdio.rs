@@ -75,7 +75,7 @@ pub async fn serve(
                 }
             }
             TransportSpec::Http { url, headers } => {
-                info!(upstream = %spec.name, url = %url, "connecting streamable-HTTP upstream");
+                info!(upstream = %spec.name, url = %config::redact_url(url), "connecting streamable-HTTP upstream");
                 match HttpTransport::new(&spec.name, url, headers, config.max_frame_bytes) {
                     Ok(t) => Transport::http(t),
                     Err(source) => {

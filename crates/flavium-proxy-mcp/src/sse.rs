@@ -14,6 +14,13 @@
 //! deliberately not implemented in T1/M2 — and events whose type is not
 //! the default `message` are surfaced with their type so the caller can
 //! ignore them knowingly.
+//!
+//! One deliberate divergence from the WHATWG decoder: invalid UTF-8 is
+//! *not* repaired with replacement characters. Lossy repair inside a
+//! JSON string would silently alter payload bytes the proxy promises to
+//! forward untouched, so an event containing invalid UTF-8 is discarded
+//! whole ([`SseItem::InvalidUtf8`]) and accounted, like an oversized
+//! one — fail closed over fail garbled.
 
 use std::time::Duration;
 
@@ -30,6 +37,9 @@ pub enum SseItem {
     /// An event was discarded because it exceeded the size cap. The
     /// stream itself is fine and stays synchronized.
     Oversized,
+    /// An event was discarded because a line of it was not valid
+    /// UTF-8; repairing it would corrupt payload bytes.
+    InvalidUtf8,
     /// The server sent a `retry` reconnection hint.
     Retry(Duration),
 }
@@ -46,6 +56,9 @@ pub struct SseParser {
     event_type: Option<String>,
     /// The current event blew the cap; discard it at dispatch.
     oversized: bool,
+    /// The current event contained invalid UTF-8; discard it at
+    /// dispatch.
+    invalid_utf8: bool,
     /// The previous byte was a CR — an immediately following LF is part
     /// of the same line ending.
     swallow_lf: bool,
@@ -63,6 +76,7 @@ impl SseParser {
             data: String::new(),
             event_type: None,
             oversized: false,
+            invalid_utf8: false,
             swallow_lf: false,
             at_start: true,
         }
@@ -103,7 +117,8 @@ impl SseParser {
     /// by a blank line is never dispatched, so this only reports
     /// whether data was discarded.
     pub fn finish(&mut self) -> bool {
-        let incomplete = !self.data.is_empty() || !self.line.is_empty() || self.oversized;
+        let incomplete =
+            !self.data.is_empty() || !self.line.is_empty() || self.oversized || self.invalid_utf8;
         self.line.clear();
         self.reset_event();
         incomplete
@@ -111,10 +126,15 @@ impl SseParser {
 
     fn end_line(&mut self, items: &mut Vec<SseItem>) {
         let raw = std::mem::take(&mut self.line);
-        // Lossy decoding mirrors the WHATWG stream decoder; a payload
-        // with real encoding damage will fail JSON parsing downstream,
-        // where it is dropped with its own typed accounting.
-        let mut line: &str = &String::from_utf8_lossy(&raw);
+        // Strict decoding: repairing damage would silently mutate
+        // payload bytes, so an event with a bad line is poisoned and
+        // discarded whole at dispatch.
+        let Ok(decoded) = std::str::from_utf8(&raw) else {
+            self.invalid_utf8 = true;
+            self.at_start = false;
+            return;
+        };
+        let mut line: &str = decoded;
         if self.at_start {
             self.at_start = false;
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
@@ -154,7 +174,9 @@ impl SseParser {
     }
 
     fn dispatch(&mut self, items: &mut Vec<SseItem>) {
-        if self.oversized {
+        if self.invalid_utf8 {
+            items.push(SseItem::InvalidUtf8);
+        } else if self.oversized {
             items.push(SseItem::Oversized);
         } else if !self.data.is_empty() {
             let mut data = std::mem::take(&mut self.data);
@@ -175,6 +197,7 @@ impl SseParser {
         self.data.clear();
         self.event_type = None;
         self.oversized = false;
+        self.invalid_utf8 = false;
     }
 }
 
@@ -304,13 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_is_decoded_lossily_not_fatally() {
+    fn invalid_utf8_discards_the_event_and_stream_resyncs() {
         let mut p = SseParser::new(1024);
-        let items = collect(&mut p, b"data: \xff\xfe\n\n");
-        assert_eq!(items.len(), 1);
-        match &items[0] {
-            SseItem::Event { data, .. } => assert!(data.contains('\u{fffd}')),
-            other => panic!("expected event, got {other:?}"),
-        }
+        // The whole event is poisoned — including data lines that were
+        // themselves fine — and the next event is unaffected.
+        let items = collect(&mut p, b"data: ok-line\ndata: \xff\xfe\n\ndata: after\n\n");
+        assert_eq!(items, vec![SseItem::InvalidUtf8, event("after")]);
     }
 }

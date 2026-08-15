@@ -66,7 +66,8 @@ pub enum HttpSetupError {
     /// The URL does not parse or is not http/https.
     #[error("invalid upstream url {url:?}")]
     BadUrl {
-        /// The URL as configured.
+        /// The URL in redacted form (never the configured bytes, which
+        /// may embed credentials).
         url: String,
     },
 
@@ -138,11 +139,11 @@ impl HttpTransport {
         max_frame: usize,
     ) -> Result<Self, HttpSetupError> {
         let parsed = reqwest::Url::parse(url).map_err(|_| HttpSetupError::BadUrl {
-            url: url.to_owned(),
+            url: crate::config::redact_url(url),
         })?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err(HttpSetupError::BadUrl {
-                url: url.to_owned(),
+                url: crate::config::redact_url(url),
             });
         }
         let mut extra = HeaderMap::new();
@@ -187,6 +188,23 @@ impl HttpTransport {
         let shared = Arc::clone(&self.shared);
         self.tasks.spawn(post_task(shared, frame, ctx));
         Ok(())
+    }
+
+    /// Sends one frame and awaits the server's acceptance of it — the
+    /// ordering barrier for lifecycle-sensitive frames (the
+    /// `initialized` notification MUST reach the server before any
+    /// subsequent request). Failure is returned to the caller instead
+    /// of being logged away.
+    pub async fn send_ordered(
+        &mut self,
+        frame: Vec<u8>,
+        ctx: SendContext,
+    ) -> Result<(), TransportError> {
+        match run_post(&self.shared, frame, ctx).await {
+            Ok(()) => Ok(()),
+            Err(HttpIssue::SessionExpired) => Err(TransportError::SessionExpired),
+            Err(HttpIssue::Failed(reason)) => Err(TransportError::Http { reason }),
+        }
     }
 
     /// Receives the next inbound item. This never reports a clean end
@@ -359,7 +377,7 @@ async fn run_post(shared: &Shared, frame: Vec<u8>, ctx: SendContext) -> Result<(
         .body(frame)
         .send()
         .await
-        .map_err(|err| HttpIssue::Failed(err.to_string()))?;
+        .map_err(|err| HttpIssue::Failed(err.without_url().to_string()))?;
 
     capture_session(shared, &resp);
     let status = resp.status();
@@ -385,7 +403,14 @@ async fn run_post(shared: &Shared, frame: Vec<u8>, ctx: SendContext) -> Result<(
                 .await;
                 return Err(HttpIssue::Failed("response body exceeded frame cap".into()));
             };
-            let body = normalize_newlines(body);
+            let Ok(body) = normalize_newlines(body) else {
+                // A raw newline inside a string literal: never valid
+                // JSON; refusing beats silently repairing.
+                push(shared, Inbound::Dropped(DropReason::InvalidEncoding)).await;
+                return Err(HttpIssue::Failed(
+                    "response body has raw newlines inside strings".into(),
+                ));
+            };
             let answered = match ctx {
                 SendContext::Request { upstream_id } => answers(&body, upstream_id),
                 SendContext::FireAndForget => true,
@@ -443,7 +468,7 @@ async fn read_sse(
     loop {
         let chunk = match stream.next().await {
             Some(Ok(chunk)) => chunk,
-            Some(Err(err)) => return Err(HttpIssue::Failed(err.to_string())),
+            Some(Err(err)) => return Err(HttpIssue::Failed(err.without_url().to_string())),
             None => break,
         };
         for item in parser.push(&chunk) {
@@ -467,7 +492,11 @@ async fn handle_sse_item(
         SseItem::Event { event_type, data }
             if event_type.is_none() || event_type.as_deref() == Some("message") =>
         {
-            let frame = normalize_newlines(data.into_bytes());
+            let Ok(frame) = normalize_newlines(data.into_bytes()) else {
+                debug!(upstream = %shared.label, "SSE event has raw newlines inside strings; dropped");
+                push(shared, Inbound::Dropped(DropReason::InvalidEncoding)).await;
+                return;
+            };
             if let Ok(Message::Response {
                 id: ResponseId::Id(RequestId::Number(n)),
                 ..
@@ -496,6 +525,9 @@ async fn handle_sse_item(
                 }),
             )
             .await;
+        }
+        SseItem::InvalidUtf8 => {
+            push(shared, Inbound::Dropped(DropReason::InvalidEncoding)).await;
         }
         SseItem::Retry(delay) => {
             shared.retry_hint_ms.store(
@@ -567,15 +599,19 @@ async fn run_get(shared: &Shared) -> Result<bool, GetEnd> {
         .headers(headers)
         .send()
         .await
-        .map_err(|err| GetEnd::Failed(err.to_string()))?;
+        .map_err(|err| GetEnd::Failed(err.without_url().to_string()))?;
 
     let status = resp.status();
     if status == StatusCode::NOT_FOUND && has_session(shared) {
         return Err(GetEnd::SessionExpired);
     }
-    if status.is_client_error() {
-        // 405 = no stream offered; other 4xx will not improve by
-        // retrying the same request.
+    // The spec reserves exactly one "no stream offered" signal: 405.
+    // (A 404 without session management gets the same treatment — an
+    // endpoint that has no GET route.) Everything else, 4xx included,
+    // may be transient — a rate limiter, a gateway hiccup — and
+    // permanently abandoning the stream over it would silently lose
+    // every future list_changed; retry with backoff instead.
+    if status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND {
         return Err(GetEnd::NotSupported(format!("HTTP {status}")));
     }
     if !status.is_success() {
@@ -594,7 +630,7 @@ async fn run_get(shared: &Shared) -> Result<bool, GetEnd> {
     loop {
         let chunk = match stream.next().await {
             Some(Ok(chunk)) => chunk,
-            Some(Err(err)) => return Err(GetEnd::Failed(err.to_string())),
+            Some(Err(err)) => return Err(GetEnd::Failed(err.without_url().to_string())),
             None => break,
         };
         for item in parser.push(&chunk) {

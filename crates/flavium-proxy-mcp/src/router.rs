@@ -23,13 +23,19 @@
 //! - a client id already in flight ⇒ `-32600`.
 //!
 //! Failure policy, stated plainly: any upstream ending — process exit,
-//! pipe death, HTTP session expiry — ends the whole session (abnormal
-//! exit). Supervision policies are T3 work; until then the proxy
-//! prefers dying loudly over serving a session whose tool surface
-//! silently shrank. A failed *re-list* after `list_changed` keeps the
-//! previous table (availability may lag; authority never depends on
-//! this table — grants gate calls in M5); a re-list *collision* ends
-//! the session like a startup collision would.
+//! pipe death, write stall, HTTP session expiry — ends the whole
+//! session (abnormal exit). Supervision policies are T3 work; until
+//! then the proxy prefers dying loudly over serving a session whose
+//! tool surface silently shrank. A failed *re-list* after
+//! `list_changed` keeps the previous table (availability may lag;
+//! authority never depends on this table — grants gate calls in M5); a
+//! re-list *collision* ends the session like a startup collision would.
+//!
+//! Backpressure policy: the serve loop never parks on an actor's
+//! command queue (a saturated upstream answers `-32603 upstream busy`
+//! instead — waiting would close a deadlock cycle between the command
+//! and event queues), tool tables are byte-budgeted per upstream, and
+//! everything client-bound funnels through one writer task.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,7 +49,9 @@ use tracing::{debug, info, warn};
 
 use crate::builder::{self, code};
 use crate::config::ConfigError;
-use crate::connection::{self, CallError, Command, ConnectError, Event, Handle, UpstreamInfo};
+use crate::connection::{
+    self, CallError, Command, ConnectError, Event, Handle, SendRefusal, UpstreamInfo,
+};
 use crate::envelope::{self, Message, RequestId};
 use crate::framing::{write_frame, FrameReadError, FrameReader, DEFAULT_MAX_FRAME_BYTES};
 use crate::idmap::ClientTable;
@@ -148,6 +156,12 @@ pub enum ListError {
     /// The upstream declared more than [`MAX_TOOLS_PER_UPSTREAM`] tools.
     #[error("upstream declared too many tools")]
     TooManyTools,
+
+    /// The upstream's tools exceed the byte budget (one frame's worth
+    /// per upstream) — page and count caps alone would still admit
+    /// gigabytes.
+    #[error("upstream tool list exceeds the byte budget")]
+    TooManyBytes,
 }
 
 /// Errors from [`run`] itself.
@@ -303,6 +317,7 @@ where
         relists: JoinSet::new(),
         relist_running: Vec::new(),
         relist_dirty: Vec::new(),
+        pending_list_changed: false,
         to_client,
         frames_to_upstream: 0,
         rejected: 0,
@@ -315,19 +330,31 @@ where
 
     // Teardown: ask every actor to close (children reaped, HTTP
     // sessions DELETEd), then give them — and the writer — the grace
-    // period to finish.
+    // period to finish. try_send: a wedged actor's queue may be full,
+    // and waiting on it would let a dead upstream hold run() open
+    // forever; the graced join + abort below bounds it regardless.
     for handle in &session.handles {
-        let _ = handle.send(Command::Shutdown).await;
+        let _ = handle.try_send(Command::Shutdown);
     }
+    // Relist tasks hold Handle clones; abort them first so dropping the
+    // router's handles actually closes every command channel — the
+    // fallback shutdown signal for an actor whose queue was full.
+    session.relists.abort_all();
+    drop(session.handles);
     for join in actor_joins {
         join_with_grace(join, config.shutdown_grace).await;
     }
     drop(session.to_client);
-    session.relists.abort_all();
-    let writer_end = match tokio::time::timeout(config.shutdown_grace, writer).await {
+    let mut writer = writer;
+    let writer_end = match tokio::time::timeout(config.shutdown_grace, &mut writer).await {
         Ok(Ok(end)) => end,
         Ok(Err(_)) => return Err(RunError::TaskFailed),
-        Err(_) => WriterEnd::WriteError,
+        Err(_) => {
+            // The client stopped reading and the writer is parked on
+            // the dead pipe; abandon it rather than leak it.
+            writer.abort();
+            WriterEnd::WriteError
+        }
     };
 
     let summary = SessionSummary {
@@ -390,7 +417,7 @@ async fn startup(
         }
     }
     if let Some(err) = first_error {
-        shutdown_all(&handles, joins, config.shutdown_grace).await;
+        shutdown_all(handles, joins, config.shutdown_grace).await;
         return Err(err);
     }
 
@@ -399,6 +426,7 @@ async fn startup(
         let declared = info.tools_declared;
         let name = info.name.clone();
         let list_timeout = config.list_timeout;
+        let byte_budget = config.max_frame_bytes;
         async move {
             if !declared {
                 // An upstream without the tools capability contributes
@@ -407,7 +435,7 @@ async fn startup(
                 warn!(upstream = %name, "upstream declares no tools capability");
                 return Ok(Vec::new());
             }
-            drain_tools(&handle, list_timeout)
+            drain_tools(&handle, list_timeout, byte_budget)
                 .await
                 .map_err(|source| StartupError::List { name, source })
         }
@@ -423,7 +451,7 @@ async fn startup(
         }
     }
     if let Some(err) = first_error {
-        shutdown_all(&handles, joins, config.shutdown_grace).await;
+        shutdown_all(handles, joins, config.shutdown_grace).await;
         return Err(err);
     }
 
@@ -436,16 +464,19 @@ async fn startup(
                 first: name(collision.first),
                 second: name(collision.second),
             };
-            shutdown_all(&handles, joins, config.shutdown_grace).await;
+            shutdown_all(handles, joins, config.shutdown_grace).await;
             Err(err)
         }
     }
 }
 
-async fn shutdown_all(handles: &[Handle], joins: Vec<JoinHandle<()>>, grace: Duration) {
-    for handle in handles {
-        let _ = handle.send(Command::Shutdown).await;
+async fn shutdown_all(handles: Vec<Handle>, joins: Vec<JoinHandle<()>>, grace: Duration) {
+    for handle in &handles {
+        let _ = handle.try_send(Command::Shutdown);
     }
+    // Dropping the handles closes the command channels — the fallback
+    // shutdown signal; the graced join + abort bounds a wedged actor.
+    drop(handles);
     for join in joins {
         join_with_grace(join, grace).await;
     }
@@ -458,9 +489,15 @@ async fn join_with_grace(mut join: JoinHandle<()>, grace: Duration) {
     }
 }
 
-/// Drains one upstream's full tool list through its pagination.
-async fn drain_tools(handle: &Handle, list_timeout: Duration) -> Result<Vec<ToolEntry>, ListError> {
+/// Drains one upstream's full tool list through its pagination,
+/// bounding pages, tool count, and total retained bytes.
+async fn drain_tools(
+    handle: &Handle,
+    list_timeout: Duration,
+    byte_budget: usize,
+) -> Result<Vec<ToolEntry>, ListError> {
     let mut tools = Vec::new();
+    let mut bytes = 0usize;
     let mut cursor: Option<String> = None;
     for _page in 0..MAX_LIST_PAGES {
         let params = cursor
@@ -468,6 +505,12 @@ async fn drain_tools(handle: &Handle, list_timeout: Duration) -> Result<Vec<Tool
             .map(|c| serde_json::json!({ "cursor": c }).to_string());
         let result = handle.call("tools/list", params, list_timeout).await?;
         let page = ListPage::parse(result.get())?;
+        for tool in &page.tools {
+            bytes = bytes.saturating_add(tool.raw.get().len());
+        }
+        if bytes > byte_budget {
+            return Err(ListError::TooManyBytes);
+        }
         tools.extend(page.tools);
         if tools.len() > MAX_TOOLS_PER_UPSTREAM {
             return Err(ListError::TooManyTools);
@@ -534,6 +577,9 @@ struct Session {
     relists: JoinSet<RelistOutcome>,
     relist_running: Vec<bool>,
     relist_dirty: Vec<bool>,
+    /// A tool-table change happened before the client face reached
+    /// Ready; one list_changed is flushed at the transition.
+    pending_list_changed: bool,
     to_client: mpsc::Sender<Vec<u8>>,
     frames_to_upstream: u64,
     rejected: u64,
@@ -761,7 +807,23 @@ impl Session {
                 }
             }
         }
-        builder::result_frame(id_raw, &self.toolset.merged_result())
+        let merged = self.toolset.merged_result();
+        // Per-upstream byte budgets bound each upstream at one frame's
+        // worth, but several upstreams can still sum past what one
+        // frame may carry; refuse rather than emit a frame the proxy
+        // itself would reject on any read path.
+        if merged.len().saturating_add(64) > self.config.max_frame_bytes {
+            warn!(
+                bytes = merged.len(),
+                "merged tool list exceeds the frame cap; refusing to serve it"
+            );
+            return builder::error_frame(
+                id_raw,
+                code::INTERNAL_ERROR,
+                "merged tool list exceeds the frame limit",
+            );
+        }
+        builder::result_frame(id_raw, &merged)
     }
 
     async fn on_tools_call(
@@ -819,19 +881,29 @@ impl Session {
             client_id_raw: id_raw.clone().into_boxed_str(),
             frame,
         };
-        if self.handles[upstream].send(command).await.is_err() {
-            // The actor is gone; its Fatal/Ended event is already in
-            // the queue and will end the session. Answer this call so
-            // the client is not left waiting meanwhile.
-            self.in_flight.remove(&id);
-            let reply = builder::error_frame(&id_raw, code::INTERNAL_ERROR, "upstream unavailable");
-            if !self.deliver(reply).await {
-                return Some(SessionEnd::ClientWriteFailed);
+        // try_send, never send: the serve loop must not park on a full
+        // actor queue while that actor may be parked on the event queue
+        // the serve loop drains — that cycle is a deadlock.
+        match self.handles[upstream].try_send(command) {
+            Ok(()) => {
+                self.frames_to_upstream += 1;
+                None
             }
-            return None;
+            Err(refusal) => {
+                self.in_flight.remove(&id);
+                let message = match refusal {
+                    SendRefusal::Busy => "upstream busy",
+                    // The actor is gone; its Fatal/Ended event will end
+                    // the session. Answer this call meanwhile.
+                    SendRefusal::Closed => "upstream unavailable",
+                };
+                let reply = builder::error_frame(&id_raw, code::INTERNAL_ERROR, message);
+                if !self.deliver(reply).await {
+                    return Some(SessionEnd::ClientWriteFailed);
+                }
+                None
+            }
         }
-        self.frames_to_upstream += 1;
-        None
     }
 
     async fn on_client_notification(
@@ -845,6 +917,14 @@ impl Session {
                 if self.phase == Phase::Initializing {
                     self.phase = Phase::Ready;
                     info!("client session initialized");
+                    if self.pending_list_changed {
+                        self.pending_list_changed = false;
+                        let note =
+                            builder::notification_frame("notifications/tools/list_changed", None);
+                        if !self.deliver(note).await {
+                            return Some(SessionEnd::ClientWriteFailed);
+                        }
+                    }
                 } else {
                     debug!("ignoring redundant initialized notification");
                 }
@@ -866,8 +946,16 @@ impl Session {
                     client_id: request_id,
                     frame,
                 };
-                if self.handles[upstream].send(command).await.is_ok() {
-                    self.frames_to_upstream += 1;
+                // Cancellation is best-effort by specification; if the
+                // actor's queue is full the cancel is dropped, and the
+                // in-flight entry is already removed, so the eventual
+                // response is dropped by the route check instead.
+                match self.handles[upstream].try_send(command) {
+                    Ok(()) => self.frames_to_upstream += 1,
+                    Err(refusal) => {
+                        self.discarded += 1;
+                        debug!(?refusal, "cancellation not forwarded");
+                    }
                 }
                 None
             }
@@ -889,18 +977,47 @@ impl Session {
                 client_id,
                 frame,
             } => {
-                if self.in_flight.remove(&client_id).is_none() {
-                    debug!(
-                        upstream,
-                        "response for a request no longer in flight; delivering anyway"
-                    );
-                }
-                if !self.deliver(frame).await {
-                    return Some(SessionEnd::ClientWriteFailed);
+                // The response must answer a request that is (a) still
+                // in flight and (b) routed to the upstream it came
+                // from. (a) fails for responses that raced a
+                // cancellation — the plan's "late responses after
+                // cancel dropped"; (b) fails when the client has since
+                // reused the id toward a different upstream, which a
+                // stale response must not hijack.
+                match self.in_flight.route(&client_id) {
+                    Some(routed) if routed == upstream => {
+                        self.in_flight.remove(&client_id);
+                        if !self.deliver(frame).await {
+                            return Some(SessionEnd::ClientWriteFailed);
+                        }
+                    }
+                    Some(_) => {
+                        self.discarded += 1;
+                        debug!(
+                            upstream,
+                            "stale response from a different upstream; dropped"
+                        );
+                    }
+                    None => {
+                        self.discarded += 1;
+                        debug!(
+                            upstream,
+                            "response for a request no longer in flight; dropped"
+                        );
+                    }
                 }
                 None
             }
             Event::Notification { frame, .. } => {
+                // Server-originated traffic before the client-face
+                // handshake completes would violate the lifecycle;
+                // progress before Ready references requests that cannot
+                // exist yet.
+                if self.phase != Phase::Ready {
+                    self.discarded += 1;
+                    debug!("upstream notification before client is ready; dropped");
+                    return None;
+                }
                 if !self.deliver(frame).await {
                     return Some(SessionEnd::ClientWriteFailed);
                 }
@@ -936,10 +1053,11 @@ impl Session {
         self.relist_running[upstream] = true;
         let handle = self.handles[upstream].clone();
         let list_timeout = self.config.list_timeout;
+        let byte_budget = self.config.max_frame_bytes;
         self.relists.spawn(async move {
             RelistOutcome {
                 upstream,
-                result: drain_tools(&handle, list_timeout).await,
+                result: drain_tools(&handle, list_timeout, byte_budget).await,
             }
         });
     }
@@ -970,6 +1088,14 @@ impl Session {
                             tools = self.toolset.len(),
                             "tool list re-merged after list_changed"
                         );
+                        // Before the client face is Ready no
+                        // server-originated frame may cross; remember
+                        // the change and flush one notification at the
+                        // transition.
+                        if self.phase != Phase::Ready {
+                            self.pending_list_changed = true;
+                            return None;
+                        }
                         let note =
                             builder::notification_frame("notifications/tools/list_changed", None);
                         if !self.deliver(note).await {
