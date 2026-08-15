@@ -188,6 +188,15 @@ is the source of truth for architecture; this file only fixes the words.
   decision carries the `now` it used) behind the `TraceSink` trait;
   T1 emits JSONL from the CLI (M5); the hash-chained SQLite recorder
   with deterministic replay is T4.
+- **Authorizer** — the seam the proxy asks "may this principal make this
+  call now?" (`flavium_core::Authorizer`, M3): a trait with no I/O and
+  no clock, so every answer is replayable. The runtime implementation is
+  Cedar-backed (`flavium-policy`, M4); the implementation on
+  `GrantEnvelope` is the *reference* one — see *reference semantics*.
+- **Reference semantics** — `flavium_core::decide`: the small, boring
+  function that *defines* what a grant means. It is the specification
+  the runtime engine is measured against (see *differential test*), not
+  the engine itself. When the two disagree, the engine has the bug.
 - **Denial surface** — the pinned, client-visible shape of every
   refusal. Notably: a tool outside the table answers `-32602` exactly
   like a tool outside the grant envelope will (M5) — denial is
@@ -196,6 +205,83 @@ is the source of truth for architecture; this file only fixes the words.
   never repair, guess, or forward it. Unparseable frames are rejected
   or dropped, evaluation errors deny, invalid encodings are refused
   rather than patched.
+
+## Policy engine (Cedar)
+
+The terms below are Cedar's, as flavium uses them (M4,
+`flavium-policy`). Cedar is the mandated engine; flavium never asks a
+user to write Cedar — grants are compiled into it.
+
+- **Cedar** — the open-source authorization policy language and engine
+  (`cedar-policy`, pinned 4.12) flavium evaluates every tool call
+  against. Chosen because it has a formal semantics and a mechanised
+  model behind it (DESIGN §6), so the policy-evaluation half of the
+  verification story is someone else's proven work.
+- **Policy** — one authorization rule. It has an **effect** (`permit` or
+  `forbid`), a **scope** naming the principal, action and resource it
+  applies to, and optional **conditions** (`when { … }` clauses).
+  Flavium compiles **one `permit` policy per grant**; it never emits
+  `forbid`, because deny-by-default is the whole model — anything no
+  permit covers is already denied.
+- **Policy set** — the collection of policies evaluated together for one
+  request; flavium compiles a grant envelope into exactly one policy
+  set, once, at startup.
+- **Policy id** — a policy's name inside the set, unique by
+  construction. Flavium uses **the grant's index in the envelope**, so
+  Cedar's answer can be mapped straight back to the grant that allowed
+  the call (`Decision::Allow { grant }`).
+- **Entity / entity UID** — Cedar's addressable things, written
+  `Type::"id"` (`Flavium::Principal::"invoice-bot"`,
+  `Flavium::Tool::"read_file"`). Flavium builds every UID from
+  structured JSON, never by formatting text — an id containing `"` or
+  `\` is legal data and must not be able to alter a policy's meaning.
+- **Authorization request** — the question put to the engine: a
+  (principal, action, resource, context) quadruple. Flavium asks
+  "may *principal* perform `Flavium::Action::"call"` on *tool*, given
+  *this call's arguments*". Distinct from a JSON-RPC *request*.
+- **Context** — the per-request data policies may read. Flavium's
+  context is always four keys: `str` and `int` (the call's arguments by
+  type), `present` (the names of every argument supplied, which is how
+  `Absent` is expressed), and `now`. Always emitting all four is what
+  keeps evaluation from erroring on a missing attribute.
+- **`has` guard** — Cedar's attribute-existence test
+  (`context.str has path`). Every constraint flavium emits is guarded by
+  one, so an argument that is missing or of the wrong type fails the
+  guard and denies, rather than raising an evaluation error.
+- **`like` / wildcard pattern** — Cedar's string matcher, where `*`
+  matches any sequence. Prefix and suffix constraints compile to it. The
+  pattern is emitted **structurally** (a literal plus a wildcard), so
+  Cedar escapes the literal itself and a `*` inside a grant is matched
+  as a plain character.
+- **JSON policy format (EST)** — Cedar's machine-oriented policy
+  representation, parsed by `Policy::from_json`. Flavium's compiler
+  emits this rather than Cedar source text: there is no string
+  interpolation anywhere on the path from a grant to a policy, so no
+  grant value can ever be read as syntax.
+- **Determining policies** — the policies that caused the answer,
+  reported in the response's **diagnostics** alongside any evaluation
+  **errors**. Several permits may match one call; the set is unordered,
+  so flavium takes the lowest grant index to reproduce the reference
+  semantics' "first admitting live grant".
+- **Evaluation error** — a policy that could not be evaluated (a missing
+  attribute, a type mismatch). Flavium's encoding makes these
+  unreachable by construction, and treats any that appear as
+  `Deny(EvaluationError)` — the engine failing is never a reason to
+  allow.
+- **Schema** — Cedar's optional type declaration for entities and
+  context, used to validate policies ahead of time. Flavium deliberately
+  does **not** use one: its policies are generated from a closed
+  vocabulary rather than written by users, the `has` guards already
+  remove the errors a schema would catch, and a schema would have to
+  declare every argument name in every grant file.
+- **Grant compiler** — flavium's half of the bargain
+  (`flavium-policy::compile`): grant envelope → policy set. It runs once
+  per session; a grant that cannot be compiled stops startup rather than
+  failing mid-session.
+- **Differential test** — the test that runs the engine and the
+  reference semantics over the same random envelopes, calls and times
+  and asserts the *same* `Decision`, index and reason. It is how "Cedar
+  agrees with the specification" stops being a claim.
 
 ## Inside the proxy (module vocabulary)
 
