@@ -415,8 +415,10 @@ mod tests {
         let e = envelope(vec![g]);
         assert_eq!(e.tool_status("read_file", t(9)), ToolStatus::Live);
         assert_eq!(e.tool_status("read_file", t(10)), ToolStatus::Expired);
-        assert!(e.granted_tools(t(9)).contains("read_file"));
-        assert!(!e.granted_tools(t(10)).contains("read_file"));
+        let before = e.granted_tools(t(9));
+        let after = e.granted_tools(t(10));
+        assert!(before.contains("read_file"));
+        assert!(!after.contains("read_file"));
     }
 
     #[test]
@@ -468,10 +470,8 @@ mod tests {
             grant("b", &[], Some(5)),
         ]);
         let names = |now: i64| -> Vec<String> {
-            e.granted_tools(t(now))
-                .iter()
-                .map(ToolName::to_string)
-                .collect()
+            let live = e.granted_tools(t(now));
+            live.into_iter().map(|name| name.to_string()).collect()
         };
         assert_eq!(names(7), vec!["a"]);
         assert_eq!(names(0), vec!["a", "b"]);

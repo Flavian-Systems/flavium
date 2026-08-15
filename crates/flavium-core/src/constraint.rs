@@ -442,18 +442,23 @@ mod tests {
 
     #[test]
     fn bound_helper_tables() {
-        assert!(lower_bound_within::<i64>(None, None));
-        assert!(lower_bound_within(None, Some(-100)));
-        assert!(!lower_bound_within(Some(0), None));
-        assert!(lower_bound_within(Some(0), Some(0)));
-        assert!(lower_bound_within(Some(0), Some(1)));
-        assert!(!lower_bound_within(Some(0), Some(-1)));
+        // Monomorphic aliases: the helpers are generic over `T: Ord`, and
+        // bare integer literals would leave `T` to fallback inference.
+        let lower = lower_bound_within::<i64>;
+        let upper = upper_bound_within::<i64>;
 
-        assert!(upper_bound_within::<i64>(None, None));
-        assert!(upper_bound_within(None, Some(100)));
-        assert!(!upper_bound_within(Some(0), None));
-        assert!(upper_bound_within(Some(0), Some(0)));
-        assert!(upper_bound_within(Some(0), Some(-1)));
-        assert!(!upper_bound_within(Some(0), Some(1)));
+        assert!(lower(None, None));
+        assert!(lower(None, Some(-100)));
+        assert!(!lower(Some(0), None));
+        assert!(lower(Some(0), Some(0)));
+        assert!(lower(Some(0), Some(1)));
+        assert!(!lower(Some(0), Some(-1)));
+
+        assert!(upper(None, None));
+        assert!(upper(None, Some(100)));
+        assert!(!upper(Some(0), None));
+        assert!(upper(Some(0), Some(0)));
+        assert!(upper(Some(0), Some(-1)));
+        assert!(!upper(Some(0), Some(1)));
     }
 }

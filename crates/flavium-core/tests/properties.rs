@@ -111,7 +111,8 @@ fn gen_string(rng: &mut Rng, _u: &Universe) -> String {
     let count = [0, 1, 1, 1, 2, 2, 3, 3][rng.below(8)];
     let mut s = String::new();
     for _ in 0..count {
-        s.push_str(rng.pick(&TOKENS));
+        let token = *rng.pick(&TOKENS);
+        s.push_str(token);
     }
     s
 }
@@ -159,8 +160,12 @@ fn gen_grant(rng: &mut Rng, u: &Universe) -> Grant {
             constraints.insert(arg.to_string(), gen_constraint(rng, u));
         }
     }
+    // Deref explicitly: `pick` yields `&&str`, and leaving the coercion to
+    // the `&str` parameter confuses rust-analyzer's inference (it guesses
+    // `T = str` first), though rustc is fine with it.
+    let tool = *rng.pick(&TOOLS);
     Grant {
-        tool: ToolName::new(rng.pick(&TOOLS)).unwrap(),
+        tool: ToolName::new(tool).unwrap(),
         constraints,
         expires: gen_expiry(rng, u),
     }
