@@ -1,6 +1,6 @@
 [package]
 name = "flavium"
-description = "The capability runtime for AI agents (pre-v0.1 skeleton)"
+description = "The capability runtime for AI agents (pre-v0.1)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,14 @@ name = "flavium"
 path = "src/main.rs"
 
 [dependencies]
-flavium-core = { path = "../flavium-core" }
+clap = { version = "4", features = ["derive"] }
+flavium-proxy-mcp = { path = "../flavium-proxy-mcp" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+serde_json = "1"
 
 [lints]
 workspace = true

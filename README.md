@@ -4,7 +4,7 @@
 
 > A VM decides *where* the agent runs. Flavium decides *what it may do.*
 
-**Status: pre-v0.1 — design phase.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written.
+**Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written. What works today: a transparent MCP stdio proxy — `flavium proxy -- <upstream server command>` relays an unmodified MCP session between any stdio client (Claude Desktop, Claude Code, …) and one upstream server. Enforcement — grants, budgets, tracing — lands in the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
 
 ## Why
 
