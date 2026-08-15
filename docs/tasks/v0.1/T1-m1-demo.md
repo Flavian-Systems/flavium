@@ -9,9 +9,11 @@ second real client).
 Since M2 the proxy **terminates MCP on both faces** (see
 [docs/GLOSSARY.md](../../GLOSSARY.md)): flavium answers the client's
 `initialize` itself and separately initializes each upstream. Two
-visible consequences for this checklist: Claude Desktop sees
-`serverInfo.name: "flavium"` (no longer the upstream's own name), and
-there are *two* handshakes to verify in the log instead of one.
+consequences for this checklist: the `initialize` response now carries
+`serverInfo.name: "flavium"` instead of the upstream's own name (on the
+wire only — Claude Desktop's UI shows the config entry name regardless;
+see *Checking the wire directly* below), and there are *two* handshakes
+to verify in the log instead of one.
 
 ## Setup
 
@@ -67,6 +69,46 @@ there are *two* handshakes to verify in the log instead of one.
       and check that both servers' tools appear in one merged list, that
       a call to each routes to the right server, and that a deliberate
       tool-name collision is refused. Worked example below.
+
+## Checking the wire directly
+
+Claude Desktop never displays `serverInfo` — its server list, tool
+picker, and its own log lines all use the entry name from
+`claude_desktop_config.json`. To see what the proxy actually answers,
+send one `initialize` frame by hand and read the first stdout line
+(no client needed; the upstream is spawned and reaped as usual):
+
+**cmd.exe** (works as is):
+
+```bat
+echo {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}} | target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>nul
+```
+
+**Windows PowerShell 5.1** — set the pipe encoding first, or the frame
+reaches the proxy re-encoded (BOM/OEM codepage) and is answered with a
+`-32700 Parse error`, which is the proxy correctly refusing a mangled
+frame, not a proxy bug:
+
+```powershell
+$OutputEncoding = New-Object Text.UTF8Encoding $false
+'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' | .\target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>$null | Select-Object -First 1
+```
+
+(macOS/Linux: the same `echo … | flavium proxy -- npx …` works in any
+shell.)
+
+Expected first line, observed 2026-08-15 against the M2 build:
+
+```json
+{"jsonrpc":"2.0","id":0,"result":{"capabilities":{"tools":{"listChanged":true}},"protocolVersion":"2025-11-25","serverInfo":{"name":"flavium","title":"Flavium MCP proxy","version":"0.1.0-alpha.0"}}}
+```
+
+On the M1 build the same command returned the upstream's own
+`serverInfo` (`secure-filesystem-server` 0.2.0) — that difference is
+the protocol termination made visible. The scripted tests pin the M2
+shape (`router_session.rs`, `proxy_e2e.rs`); MCP Inspector
+(`npx @modelcontextprotocol/inspector`) shows the same field in its
+Server Info panel if a GUI is preferred.
 
 ## Multi-upstream variant
 
