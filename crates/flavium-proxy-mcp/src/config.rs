@@ -122,6 +122,18 @@ pub enum ConfigError {
 }
 
 /// Validates a full upstream set structurally.
+///
+/// Checks, in order and stopping at the first failure: at least one
+/// upstream; every name non-empty and unique; every stdio command line
+/// non-empty with a non-empty program; every HTTP URL parseable with an
+/// `http` or `https` scheme. It does not touch the network or the
+/// filesystem — spawnability and header syntax are checked where the
+/// transport is built ([`crate::transport::SpawnError`],
+/// [`crate::http::HttpSetupError`]).
+///
+/// # Errors
+///
+/// The corresponding [`ConfigError`]; URLs in errors are pre-redacted.
 pub fn validate(specs: &[UpstreamSpec]) -> Result<(), ConfigError> {
     if specs.is_empty() {
         return Err(ConfigError::NoUpstreams);

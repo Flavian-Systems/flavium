@@ -7,7 +7,9 @@
 /// Real types land with the first proxy milestone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
+    /// Who holds the grant.
     pub principal: String,
+    /// The tool the grant authorizes.
     pub tool: String,
 }
 

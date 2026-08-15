@@ -33,7 +33,8 @@ core and future formal-verification target**. In these two crates:
   it is protected and requires the status check.
 - Before every commit run: `cargo fmt --all` then
   `cargo clippy --workspace --all-targets -- -D warnings` then
-  `cargo test --workspace`. The pre-commit hook enforces fmt+clippy;
+  `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` then
+  `cargo test --workspace`. The pre-commit hook enforces fmt+clippy+doc;
   don't bypass it (`--no-verify` is for humans in emergencies only).
 - Sign off every commit: `git commit -s` (DCO). Keep PR titles usable as
   squash-commit messages: imperative, ≤72 chars.
@@ -54,8 +55,10 @@ core and future formal-verification target**. In these two crates:
 - Tests: unit tests beside code; integration tests under `tests/`;
   property-style tests for invariants where feasible. A feature without a
   failing-case test (what gets *denied*) is incomplete.
-- Docs: public items get rustdoc; user-facing behavior changes update
-  README.md or DESIGN.md in the same PR.
+- Docs: public items get rustdoc (`missing_docs` is a workspace lint and
+  `cargo doc` runs with `-D warnings` in CI, so a missing doc or a
+  broken intra-doc link fails the build); user-facing behavior changes
+  update README.md or DESIGN.md in the same PR.
 
 ## Scope guardrails
 

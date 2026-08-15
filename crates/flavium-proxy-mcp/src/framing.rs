@@ -130,6 +130,13 @@ fn find_newline(haystack: &[u8]) -> Option<usize> {
 }
 
 /// Writes one frame followed by the `\n` delimiter, then flushes.
+///
+/// # Errors
+///
+/// A frame containing a raw `\n` is refused before anything is written
+/// ([`FrameWriteError::EmbeddedNewline`]) — writing it would split into
+/// two frames on the peer's side. I/O failures surface as
+/// [`FrameWriteError::Io`]; a partial write may have occurred.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     frame: &[u8],

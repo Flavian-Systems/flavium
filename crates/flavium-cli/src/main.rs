@@ -26,7 +26,7 @@ enum Cmd {
     /// Run the MCP proxy in front of one or more upstream servers.
     ///
     /// Upstreams come from a TOML config file (--config) with one
-    /// [[upstream]] table per server (stdio `command` or streamable-HTTP
+    /// `[[upstream]]` table per server (stdio `command` or streamable-HTTP
     /// `url` + optional `headers`), or — for a single stdio upstream —
     /// from the command line after `--`. The proxy answers initialize
     /// itself, merges the upstreams' tools, and routes calls by tool
