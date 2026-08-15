@@ -10,8 +10,9 @@ must deliver. Where this document and the code disagree, the code is
 right and this document has a bug. Vocabulary is fixed in
 [GLOSSARY.md](../GLOSSARY.md).
 
-Milestones M3–M5 will add types, an enforcement hook, and a trace sink
-(§10). The flows below gain a step; their shape does not change.
+M3 added the types, traits and trace vocabulary in `flavium-core`; M4
+and M5 will add the engine and the enforcement hook (§10). The flows
+below gain a step; their shape does not change.
 
 ## Contents
 
@@ -690,27 +691,47 @@ Only `ProxyConfig` is runtime-configurable today; the CLI passes
 ## 10. Where enforcement plugs in
 
 What the T1 plan says lands next, and the seams in this crate that were
-left for it. This section is a forecast — update it as M3–M5 merge.
+left for it. This section is a forecast — update it as M4–M5 merge.
 
+- **The vocabulary exists (M3, `flavium-core`).** `GrantEnvelope`
+  (principal + grants), `Grant`/`Constraint`/`ArgValue`, `ToolCall`,
+  `Decision`/`DenialReason`, the reference `decide`, `attenuates`, and
+  two traits with no I/O: `Authorizer` (`authorize(principal, call,
+  now) -> Decision`, `granted_tools(principal, now)`) and `TraceSink`
+  (`record(&TraceEvent) -> Result`). The proxy will depend on
+  `flavium-core` only; the Cedar engine (M4, `flavium-policy`)
+  implements `Authorizer` and the CLI wires it. The full `TraceEvent`
+  catalog — session start/end, handshake, `ToolsListed`, `CallRefused`
+  / `CallDecided` / `CallCompleted` keyed by a per-session `CallId`,
+  `FrameRejected`, `FrameDiscarded`, `UpstreamEnded` — is defined
+  there; M5 emits it.
 - **`tools/call` authorization (M5, via `flavium-policy`).** The hook
   point is `Session::on_tools_call`, between `ToolSet::route` and
-  `Command::Forward`: the call's `name` and `arguments` (plus `now`)
-  become the authorization context; a tool outside the grant envelope
-  answers `-32602` exactly as an unknown tool does today; a granted
-  tool with out-of-envelope arguments answers an `isError: true`
-  result (`denied by policy`) — agent-visible and recoverable, leaking
-  no grant internals. Neither reaches the upstream.
+  `Command::Forward`: the call's `name` and `arguments` become a
+  `ToolCall` (strings and `i64` integers as themselves, everything else
+  `ArgValue::Other`; a non-object `arguments` or duplicate keys ⇒
+  `-32602` + `CallRefused`), `now` is taken once, and the `Authorizer`
+  answers. `NotGranted`/`Expired` answer `-32602` exactly as an unknown
+  tool does today; `OutOfEnvelope` answers an `isError: true` result
+  (`denied by policy`) — agent-visible and recoverable, leaking no
+  grant internals. Neither reaches the upstream.
 - **`tools/list` filtering (M5).** `Session::on_tools_list` will
-  project `ToolSet` down to granted tools; an expired grant makes the
-  tool vanish from the list and its calls return `-32602`.
-- **Trace events (M3 types, M5 wiring).** The counters in §7/I11 become
-  `TraceEvent`s through a `TraceSink` trait defined in `flavium-core`
-  (no I/O; the CLI supplies a JSONL sink). Natural emission points are
-  all in `router`: handshake answered, each forward, each delivery,
-  each denial/rejection/discard, each upstream end, session end. The
-  actor's drops (unknown ids, out-of-scope progress) are candidates too.
+  project `ToolSet` down to `Authorizer::granted_tools(principal, now)`;
+  an expired grant makes the tool vanish from the list and its calls
+  return `-32602`.
+- **Trace events (M5 wiring).** The counters in §7/I11 become
+  `TraceEvent`s through the `TraceSink` (the CLI supplies a JSONL
+  sink; a sink failure ends the session — fail closed on audit).
+  Emission points are all in `router`: session start, handshake
+  answered, each list, each refusal/decision/completion, each
+  rejection/discard, each upstream end, session end. `ClientTable`
+  gains the tool name and `CallId` per in-flight call so completions
+  can be attributed. Two of the actor's drops (unknown response ids,
+  out-of-scope progress) have `DiscardKind`s reserved; the rest of the
+  upstream-face drops are not traced in T1.
 - **Principal.** Static per proxy process, from CLI config; `clientInfo`
-  is untrusted data and never identity.
+  is untrusted data and never identity (it is recorded in
+  `HandshakeCompleted` as data).
 - **Deliberately deferred beyond T1/M5:** upstream supervision and
   restart policies (T3 — today any upstream ending ends the session);
   tool namespacing (`server.tool`) as the collision fallback; an HTTP

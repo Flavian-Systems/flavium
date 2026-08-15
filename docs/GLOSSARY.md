@@ -145,18 +145,37 @@ is the source of truth for architecture; this file only fixes the words.
 
 ## Enforcement (the vocabulary the rest of v0.1 builds on)
 
-- **Grant** — an unforgeable authorization: principal + tool +
-  argument constraints + expiry (+ budget). The unit of authority in
-  flavium; lands in M4/M5 (Cedar-backed).
-- **Constraint** — the argument-level part of a grant: path prefixes,
-  recipient/domain patterns, numeric ranges — evaluated on every call.
+- **Grant** — an unforgeable authorization over one tool: argument
+  constraints + expiry (+ budget, T2). The unit of authority in flavium
+  (`flavium_core::Grant`, M3); DESIGN's tuple (principal, tool,
+  constraints, expiry, budget) is the envelope's principal × the grant.
+  Enforced from M4/M5 (Cedar-backed).
+- **Constraint** — the argument-level part of a grant, one per argument
+  name (`flavium_core::Constraint`): `Prefix`, `Suffix`, `OneOf`,
+  `Range` (inclusive `i64` bounds), and `Absent` (the argument must not
+  be supplied — how `cc`/`bcc` get closed). Byte-wise, fail closed: a
+  constrained argument that is missing, of the wrong type, or of an
+  unmodelled shape is not admitted; arguments no constraint names are
+  not examined (an authoring pitfall: constrain every argument that
+  matters).
 - **Grant envelope** — the union of an agent's grants: the precomputable
-  worst case of what it can do.
+  worst case of what it can do (`flavium_core::GrantEnvelope`:
+  principal + grants, in file order).
+- **Decision** — the outcome of authorizing one call
+  (`flavium_core::Decision`): `Allow { grant }` (index of the first
+  live grant that admits it) or `Deny(reason)` with `NotGranted`,
+  `Expired`, `OutOfEnvelope`, or `EvaluationError` (engine failure,
+  fail closed). `decide` in flavium-core is the reference semantics the
+  runtime engine is tested against.
 - **Attenuation** — authority only ever narrows as it flows down. The
-  core invariant (`attenuates()`, M3): a child's grant set is a subset
-  of its parent's on every axis. M2 already practices it at the
-  protocol level: flavium declares no capabilities upstream, closing
-  the server→client request channel.
+  core invariant (`flavium_core::attenuates`, M3): a child's grant set
+  is a subset (⊆, equality allowed) of its parent's on every axis —
+  tool, expiry, every constrained argument. The check is sound and
+  conservative: it never accepts a child that could do something the
+  parent cannot; it may refuse a child that must be written more
+  explicitly. M2 already practices it at the protocol level: flavium
+  declares no capabilities upstream, closing the server→client request
+  channel.
 - **Delegation** — a parent agent spawning a sub-agent with (strictly
   attenuated) grants; T3 work.
 - **Budget** — a quantitative cap (tokens, spend, calls, wall-clock)
@@ -164,9 +183,11 @@ is the source of truth for architecture; this file only fixes the words.
 - **Namespace** — per-agent renaming/virtualization of what an agent
   can even name; v0.1 scope, after T1.
 - **Trace / flight recorder** — the append-only record of every call,
-  decision, denial, budget tick, spawn, and termination. T1 emits
-  JSONL behind a swappable sink; the hash-chained SQLite recorder with
-  deterministic replay is T4.
+  decision, denial, budget tick, spawn, and termination. The
+  vocabulary is `flavium_core::TraceEvent` (M3; clock-free — a
+  decision carries the `now` it used) behind the `TraceSink` trait;
+  T1 emits JSONL from the CLI (M5); the hash-chained SQLite recorder
+  with deterministic replay is T4.
 - **Denial surface** — the pinned, client-visible shape of every
   refusal. Notably: a tool outside the table answers `-32602` exactly
   like a tool outside the grant envelope will (M5) — denial is
