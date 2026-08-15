@@ -226,6 +226,20 @@ impl Handle {
     }
 
     /// Runs one proxy-internal request to completion with a deadline.
+    ///
+    /// The actor mints the upstream id, sends the request, and resolves
+    /// the returned future with the raw `result` when the response
+    /// arrives. Like [`Handle::send`], this *waits* for command-queue
+    /// space and so must only be called from tasks independent of the
+    /// router's serve loop (startup, re-lists).
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::Rpc`] if the upstream answered with a JSON-RPC
+    /// error, [`CallError::Closed`] if the actor is gone or ends before
+    /// answering, [`CallError::Timeout`] if `deadline` elapses first (the
+    /// request itself is not cancelled upstream; its late response is
+    /// dropped by the actor).
     pub async fn call(
         &self,
         method: &'static str,

@@ -13,4 +13,7 @@ fi
 echo "pre-commit: cargo clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
+echo "pre-commit: cargo doc"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
 echo "pre-commit: OK"

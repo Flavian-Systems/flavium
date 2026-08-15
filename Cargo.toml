@@ -15,6 +15,11 @@ repository = "https://github.com/Flavian-Systems/flavium"
 homepage = "https://flavium.ai"
 authors = ["Flavian Systems <hello@flavium.ai>"]
 
+[workspace.lints.rust]
+# Every public item carries rustdoc; the CI gate runs with -D warnings,
+# so an undocumented public item fails the build.
+missing_docs = "warn"
+
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"

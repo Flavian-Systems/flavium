@@ -83,6 +83,15 @@ impl SseParser {
     }
 
     /// Feeds a chunk of bytes; returns every item completed by it.
+    ///
+    /// Chunks may split lines, line endings, and multi-byte UTF-8
+    /// sequences at any byte; state carries across calls. An event is
+    /// dispatched only when its terminating blank line arrives, so a
+    /// chunk may complete zero, one, or several items. Events that blew
+    /// the size cap or contained invalid UTF-8 are reported as
+    /// [`SseItem::Oversized`]/[`SseItem::InvalidUtf8`] in place of the
+    /// event; the stream stays synchronized. Call [`SseParser::finish`]
+    /// when the body ends.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseItem> {
         let mut items = Vec::new();
         for &byte in chunk {

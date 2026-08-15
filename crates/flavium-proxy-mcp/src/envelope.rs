@@ -144,6 +144,22 @@ where
 }
 
 /// Parses one frame into a classified [`Message`].
+///
+/// This is the trust boundary every frame crosses in both directions.
+/// It accepts exactly one well-formed JSON-RPC 2.0 object — a request,
+/// a notification, or a response — and borrows `params`/`result`/`error`
+/// as raw slices of `frame` so callers forward the original bytes, never
+/// a re-serialization.
+///
+/// # Errors
+///
+/// Fail closed: anything else is an [`EnvelopeError`] and must not be
+/// forwarded — invalid UTF-8 or JSON, a JSON array (batches are
+/// unsupported), a non-object, a `jsonrpc` member other than `"2.0"`, a
+/// request id that is not an integer or string, or a member combination
+/// that is neither request, notification, nor response. Use
+/// [`EnvelopeError::is_parse_error`] to pick the JSON-RPC error code
+/// for the reply.
 pub fn parse(frame: &[u8]) -> Result<Message<'_>, EnvelopeError> {
     let text = std::str::from_utf8(frame).map_err(|_| EnvelopeError::InvalidUtf8)?;
     // Arrays are rejected before the struct parse: serde would happily
