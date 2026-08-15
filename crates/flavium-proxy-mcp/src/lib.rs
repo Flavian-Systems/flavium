@@ -11,6 +11,9 @@
 //! with ids translated both ways. `params`/`result` bodies cross the
 //! proxy byte-faithfully. No enforcement yet: grants and tracing land in
 //! later T1 milestones.
+//!
+//! How the crate is built — module map, task and channel model, message
+//! flows, invariants — is documented in `docs/architecture/proxy-mcp.md`.
 
 #![forbid(unsafe_code)]
 
