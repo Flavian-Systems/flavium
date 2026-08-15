@@ -1,5 +1,7 @@
 //! The `flavium` binary. One subcommand so far: `proxy`, the T1 MCP
-//! proxy — multiple upstreams behind one stdio server face.
+//! proxy — multiple upstreams behind one stdio server face. The
+//! operator-facing reference (flags, config file, exit codes, startup
+//! errors, client wiring) is `docs/cli.md`.
 
 #![forbid(unsafe_code)]
 

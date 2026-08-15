@@ -23,6 +23,8 @@ url = "https://example.com/mcp"
 headers = { Authorization = "Bearer …" }   # optional; values never logged
 ```
 
+Flags, the full config-file reference, exit codes, startup errors, and client wiring are in [docs/cli.md](docs/cli.md).
+
 ## Why
 
 Agents are hired for their authority, not their compute: they hold credentials to email, files, databases, APIs, and money. Prompt injection makes every agent a confused deputy — an attacker doesn't need to escape a sandbox when the agent will misuse authority it legitimately holds. VMs and sandboxes protect the *machine*; Flavium protects the *mission*.
