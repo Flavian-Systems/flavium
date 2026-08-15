@@ -17,7 +17,7 @@ clap = { version = "4", features = ["derive"] }
 flavium-proxy-mcp = { path = "../flavium-proxy-mcp" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
