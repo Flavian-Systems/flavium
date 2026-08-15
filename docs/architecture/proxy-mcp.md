@@ -743,4 +743,6 @@ children, constructing HTTP clients — closing what it already built if
 a later one fails), and hands them to `router::run` over this process's
 stdin/stdout. Logs go to stderr (`RUST_LOG`, default `info`); stdout
 carries only MCP frames; spawned children inherit stderr. The exit code
-is success iff `SessionSummary::clean_shutdown()`.
+is success iff `SessionSummary::clean_shutdown()`. The operator-facing
+reference — flags, config keys, exit codes, startup errors, client
+wiring — is [docs/cli.md](../cli.md).
