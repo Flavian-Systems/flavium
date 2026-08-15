@@ -7,9 +7,13 @@
 //! ```
 //!
 //! It answers `initialize` (protocol version 2025-11-25), `tools/list`
-//! (one `echo` tool), and `tools/call` (echoes the params back), and
-//! returns method-not-found for any other request. It exits cleanly
-//! when its stdin closes.
+//! (one tool, named by the first argument, default `echo`), and
+//! `tools/call` (echoes the params back), and returns method-not-found
+//! for any other request. It exits cleanly when its stdin closes.
+//!
+//! With a tool name argument, several instances can sit behind one
+//! proxy without colliding — or collide on purpose, when a test wants
+//! the collision rejected.
 
 // Test fixture: panicking on malformed input is acceptable here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19,6 +23,7 @@ use std::io::{BufRead, Write};
 use serde_json::{json, Value};
 
 fn main() {
+    let tool = std::env::args().nth(1).unwrap_or_else(|| "echo".to_owned());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -38,8 +43,8 @@ fn main() {
                 "id": id,
                 "result": {
                     "protocolVersion": "2025-11-25",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "scripted-upstream", "version": "0.0.0" }
+                    "capabilities": { "tools": { "listChanged": true } },
+                    "serverInfo": { "name": format!("scripted-upstream-{tool}"), "version": "0.0.0" }
                 }
             })),
             (Some("tools/list"), Some(id)) => Some(json!({
@@ -47,7 +52,7 @@ fn main() {
                 "id": id,
                 "result": {
                     "tools": [{
-                        "name": "echo",
+                        "name": tool,
                         "description": "Echoes its arguments back.",
                         "inputSchema": { "type": "object" }
                     }]

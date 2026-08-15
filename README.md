@@ -4,7 +4,24 @@
 
 > A VM decides *where* the agent runs. Flavium decides *what it may do.*
 
-**Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written. What works today: a transparent MCP stdio proxy — `flavium proxy -- <upstream server command>` relays an unmodified MCP session between any stdio client (Claude Desktop, Claude Code, …) and one upstream server. Enforcement — grants, budgets, tracing — lands in the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
+**Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written. What works today: a multi-upstream MCP proxy. `flavium` presents an MCP server to any stdio client (Claude Desktop, Claude Code, …) and fronts one or more upstream tool servers — local processes *and* streamable-HTTP endpoints — merging their tools into one list and routing every call by tool name, with `params`/`result` bodies crossing byte-faithfully. Enforcement — grants, budgets, tracing — lands in the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
+
+```bash
+flavium proxy -- npx -y @modelcontextprotocol/server-filesystem /data
+```
+
+or, for several upstreams, `flavium proxy --config flavium.toml`:
+
+```toml
+[[upstream]]
+name = "fs"
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
+
+[[upstream]]
+name = "search"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }   # optional; values never logged
+```
 
 ## Why
 
