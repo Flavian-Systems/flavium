@@ -61,7 +61,7 @@ See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest b
 
 ## Contributing
 
-Early contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go through [SECURITY.md](SECURITY.md), not public issues.
+Early contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The project vocabulary (upstream, grant, attenuation, …) is fixed in [docs/GLOSSARY.md](docs/GLOSSARY.md). Security reports go through [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 
