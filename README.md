@@ -57,7 +57,7 @@ Enforcement deepens over time without changing the policy model: proxy enforceme
 | v0.2 | Kernel-level sandboxing; LLM proxy with mid-generation budget kills; deterministic replay tooling |
 | v0.3 | Wasm isolation; machine-checked confinement core; compliance/audit exports |
 
-See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest boundaries.
+See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest boundaries, and [docs/architecture/proxy-mcp.md](docs/architecture/proxy-mcp.md) for how the MCP proxy crate is built — modules, tasks, message flows, invariants.
 
 ## Contributing
 
