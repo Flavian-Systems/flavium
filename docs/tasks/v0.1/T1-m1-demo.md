@@ -63,11 +63,61 @@ there are *two* handshakes to verify in the log instead of one.
       `end=ClientEof delivery_failed=false rejected=0 discarded=0`.
 - [x] Repeat the connect + tool-call steps with Claude Code as a second
       real client: `claude mcp add filesystem -- <same command line>`.
-- [ ] *(M2+, optional)* Multi-upstream: point the entry at a config file
-      instead — `"args": ["proxy", "--config", "<path>\\flavium.toml"]`
-      with two `[[upstream]]` entries — and check that both servers'
-      tools appear in one merged list and a call to each routes to the
-      right server.
+- [x] *(M2+)* Multi-upstream: point the entry at a config file instead
+      and check that both servers' tools appear in one merged list, that
+      a call to each routes to the right server, and that a deliberate
+      tool-name collision is refused. Worked example below.
+
+## Multi-upstream variant
+
+Config file (e.g. `flavium.toml` at the repo root; TOML needs doubled
+backslashes). `server-memory` is a good second upstream: zero-config
+via `npx`, a completely different tool family, no name overlap with
+the filesystem server.
+
+```toml
+[[upstream]]
+name = "fs"
+command = ["npx.cmd", "-y", "@modelcontextprotocol/server-filesystem",
+           "C:\\Users\\flavi\\Desktop"]
+
+[[upstream]]
+name = "memory"
+command = ["npx.cmd", "-y", "@modelcontextprotocol/server-memory"]
+```
+
+Claude Desktop entry (name it `flavium` — the log file follows the
+entry name, so it lands in `mcp-server-flavium.log`):
+
+```json
+{
+  "mcpServers": {
+    "flavium": {
+      "command": "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\target\\release\\flavium.exe",
+      "args": ["proxy", "--config",
+               "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\flavium.toml"]
+    }
+  }
+}
+```
+
+**Success case.** The server connects with one merged list — the 14
+filesystem tools *and* the 9 memory tools (23 total). "List what's on
+my Desktop" routes to `fs`; "remember that my favorite editor is
+Neovim, then read back the whole knowledge graph" routes
+`create_entities` + `read_graph` to `memory`. The log shows two
+`upstream initialized` lines (`upstream="fs"` / `upstream="memory"`),
+`all upstreams initialized; serving the client upstreams=2 tools=23`,
+the usual client handshake, and a clean `session ended`. Quitting
+leaves none of the three processes behind.
+
+**Failure case (collision refusal).** Add a third block that duplicates
+`fs` under another name (`name = "fs2"`, same command) and restart.
+The server must show as failed/disconnected in Claude Desktop, and the
+log must contain
+`proxy failed: tool "read_file" is offered by both "fs" and "fs2"` —
+the proxy refuses ambiguous authority at startup rather than picking a
+winner. Remove the block afterwards.
 
 ## Negotiated protocol version — record here
 
@@ -105,8 +155,17 @@ and negotiated 2025-11-25, and both Claude Desktop sessions ended
 orphan processes. (Claude Code's MCP logs live under
 `%LOCALAPPDATA%\claude-cli-nodejs\Cache\<project>\mcp-logs-<server>\`.)
 
-Upstream in all sessions to date: `secure-filesystem-server` 0.2.0
-via `npx.cmd`. The optional multi-upstream item has not been run
-against a real client yet (it is covered by the e2e tests).
+Single-upstream sessions to date: `secure-filesystem-server` 0.2.0 via
+`npx.cmd`.
+
+Multi-upstream variant, run 2026-08-15 on Claude Desktop against the
+M2 build: success case — `fs` (secure-filesystem-server 0.2.0) +
+`memory` (memory-server 0.6.3), both negotiating 2025-11-25, 23 tools
+merged, two clean sessions (`end=ClientEof … rejected=0 discarded=0`,
+one with three routed calls), no orphans; failure case — with a
+duplicate `fs2` block, all three upstreams initialized and the proxy
+then refused service with
+`proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
+Claude Desktop reporting the server disconnected.
 
 Current pin: **2025-11-25**.
