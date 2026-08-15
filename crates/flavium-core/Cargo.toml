@@ -1,12 +1,16 @@
 [package]
 name = "flavium-core"
-description = "Flavium core (pre-v0.1 skeleton)"
+description = "Flavium core: grant types, the attenuation invariant, reference decision semantics, and trace types (the verification target)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+
+# No dependencies, no dev-dependencies — on purpose. This crate is the
+# formal-verification target (DESIGN.md §6); adding anything here needs
+# explicit human approval (CLAUDE.md).
 
 [lints]
 workspace = true

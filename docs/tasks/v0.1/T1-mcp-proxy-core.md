@@ -7,6 +7,19 @@ thiserror). Progress: M1 landed 2026-08-15 (#1, demo checklist in
 list: `eventsource-stream` was not adopted (the SSE parser is
 hand-rolled next to the framing, as a bounded, fuzz-ready seam), and
 `futures-util` + `axum` (dev-only) were added alongside `reqwest`.
+M3 landed 2026-08-15 (milestone plan and decisions D1–D10 in
+`T1-m3-plan.md`), with these refinements to the "Type homes" and
+"Grants" bullets: the principal is the envelope's, not the grant's
+(`GrantEnvelope { principal, grants }`); the *reference* decision
+semantics (`decide`) live in flavium-core as the executable
+specification Cedar is tested against, and the `Authorizer` trait lives
+in flavium-core beside `TraceSink` so the proxy never depends on Cedar
+(flavium-policy implements it — still the sole *runtime* enforcement
+seam); the constraint vocabulary gained `Absent` (an argument must not
+be supplied — how `cc`/`bcc` get closed); the trace catalog was defined
+in full (`TraceEvent`, exhaustive enum) rather than accreted in M5; the
+budget axis is reserved for T2. flavium-core remains zero-dependency,
+dev-dependencies included.
 
 ## Goal & non-goals
 
