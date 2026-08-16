@@ -76,5 +76,18 @@ Out of scope until explicitly requested: kernel/sandbox work (Landlock,
 seccomp — that's v0.2), Wasm isolation, formal proofs, RISC-V/CHERI, any
 bespoke policy DSL (we use Cedar), GUI.
 
+Also out of scope, and **already argued** — do not re-derive it, and do
+not implement it without a task number: the MCP surfaces v0.1 does not
+mediate. Methods outside `tools/*` answer `-32601`, the server→client
+channel (sampling, elicitation, roots) is closed, and HTTP upstreams
+take static headers only. That is fail-closed on purpose — flavium does
+not offer what it cannot authorize (DESIGN §8) — so "add resources
+support" is a vocabulary question, not a routing one.
+[docs/tasks/mcp-surface-and-auth.md](docs/tasks/mcp-surface-and-auth.md)
+has the decisions and what each rules out; it is a proposal, and its
+claims are reasoned rather than spiked. One item there has a deadline
+rather than a release: D7 says T4 must reserve room in the grant and
+trace formats before publishing them as versioned specs.
+
 When a task seems to require breaking a rule above, stop and ask instead
 of proceeding.

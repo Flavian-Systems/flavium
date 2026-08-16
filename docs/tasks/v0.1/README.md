@@ -44,6 +44,15 @@ responses instead of live ones.
 **Done when:** a recorded session replays to identical decisions; trace
 tampering is detectable; the schema is documented as a spec.
 
+**Read before designing the schema:**
+[../mcp-surface-and-auth.md](../mcp-surface-and-auth.md), D7. Publishing
+the grant and trace formats as versioned specs is the point at which
+their shape stops being free to change, and the MCP surfaces v0.1 does
+not mediate each add a grant axis or an event kind. That file argues for
+reserving the room now. It is a proposal, not approved scope — but the
+deadline it names is T4's, so T4 is where the question has to be
+answered either way.
+
 ## T5 — Demo, hardening, packaging
 
 The reference prompt-injection demo (email assistant, run with/without

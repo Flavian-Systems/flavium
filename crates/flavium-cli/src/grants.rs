@@ -609,9 +609,12 @@ path = { windows-path-prefix = 'C:\Users\me\Desktop\' }
             grants.envelope.grants[0].constraints.get("path"),
             Some(&Constraint::Prefix("/data/invoices/".into()))
         );
+        // ASCII case folded: the Windows flavor decides on the resource,
+        // and Windows resolves `C:\Users\Me\` and `c:\users\me\` to one
+        // directory. The call's value is folded the same way.
         assert_eq!(
             grants.envelope.grants[1].constraints.get("path"),
-            Some(&Constraint::Prefix("C:/Users/me/Desktop/".into()))
+            Some(&Constraint::Prefix("c:/users/me/desktop/".into()))
         );
         assert_eq!(
             grants

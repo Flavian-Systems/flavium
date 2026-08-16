@@ -190,9 +190,13 @@ is the source of truth for architecture; this file only fixes the words.
   reduces to nothing (`.`, `./`) is refused rather than compiled to the
   everything-prefix, and a **leading** run of two or more separators is
   preserved rather than collapsed — on Windows `\\host\share` is another
-  machine, and POSIX leaves a leading `//` implementation-defined. No case
-  folding, no filesystem access, no symlink resolution — those are outside
-  what a proxy can see.
+  machine, and POSIX leaves a leading `//` implementation-defined. The
+  Windows flavor folds **ASCII** case on both sides, because Windows
+  resolves paths differing only in case to one file; POSIX folds nothing,
+  and neither folds outside ASCII (full Unicode folding can merge
+  characters Windows keeps apart — a false allow, where under-folding is
+  only a false denial). No filesystem access, no symlink resolution —
+  those are outside what a proxy can see.
 - **Path flavor** — which characters a path-flavored constraint treats as
   separators: POSIX (`/` only) or Windows (`/` and `\`). Declared per
   grant rather than guessed, because `\` is an ordinary filename byte on

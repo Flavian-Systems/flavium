@@ -27,6 +27,7 @@
 //!   startup never has a session and is reported through the process's
 //!   logs and exit code, not the trace.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -199,6 +200,22 @@ pub enum TraceEvent {
         call_id: CallId,
         /// The call as the core evaluated it (tool and arguments).
         call: ToolCall,
+        /// The string arguments whose spelling the caller sent differently
+        /// from the form in `call`, by argument name — empty when the two
+        /// agree, which is the common case.
+        ///
+        /// `call` answers *why was this decided so*, and it must stay the
+        /// evaluated form for that answer to reproduce. This answers the
+        /// other question an auditor asks — *what did the agent ask for* —
+        /// which the evaluated form cannot: normalization is lossy, so two
+        /// different requests (`…/a/../b` and `…/b`, or two spellings of
+        /// one Windows path) reach the same decision and were until now
+        /// recorded identically. Only differing arguments appear, so the
+        /// key's presence means normalization changed something.
+        ///
+        /// Only [`ArgValue::Str`](crate::ArgValue::Str) values are ever
+        /// normalized, so the pre-image is always a string.
+        args_as_sent: BTreeMap<String, String>,
         /// The time the decision was made with.
         now: Timestamp,
         /// The decision.
@@ -344,6 +361,7 @@ mod tests {
                     tool: "read_file".into(),
                     args: Default::default(),
                 },
+                args_as_sent: BTreeMap::new(),
                 now: Timestamp::from_unix_secs(0),
                 decision: Decision::Deny(DenialReason::NotGranted),
             },

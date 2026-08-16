@@ -8,6 +8,14 @@
 //! payload. Replaying a decision needs exactly envelope + call + `now`,
 //! and all three are here.
 //!
+//! It also has to answer *what did the agent ask for?*, and the evaluated
+//! form cannot: normalization is lossy, so `…/a/../b` and `…/b`, or two
+//! case spellings of one Windows path, are recorded identically while
+//! being different requests. So a line carries `args_as_sent` beside the
+//! evaluated `args` — the caller's own spelling, for the arguments where
+//! the two differ and only those. No key means normalization changed
+//! nothing.
+//!
 //! # The shape of a line
 //!
 //! Every line carries `v`, a monotonic `seq`, a wall-clock `ts` in Unix
@@ -31,6 +39,13 @@
 //!   so an existing file keeps whatever permissions it already had —
 //!   point `--trace` at a fresh path, or at a directory that is already
 //!   protected.
+//!
+//!   **On Windows the file gets no protection of its own**: it inherits
+//!   the parent directory's ACL. On a volume with no ACLs at all — exFAT
+//!   or FAT, which removable and cross-platform drives usually are — there
+//!   is nothing to inherit, and the trace is as readable as anything else
+//!   on that drive. Choose the directory deliberately; packaging (T5)
+//!   owns the real fix.
 //! - **A string argument longer than [`VALUE_CAP`] is truncated**, and
 //!   then — and only then — carries its full byte length and the SHA-256
 //!   of the whole value. An argument can be a megabyte of document text,
@@ -258,6 +273,7 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             principal,
             call_id,
             call,
+            args_as_sent,
             now,
             decision,
         } => {
@@ -269,6 +285,20 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             out.push_str(&now.unix_secs().to_string());
             out.push(',');
             write_call(out, call);
+            // Absent, not empty, when normalization changed nothing: the
+            // key's presence is the signal that it did.
+            if !args_as_sent.is_empty() {
+                out.push_str(r#","args_as_sent":{"#);
+                for (index, (argument, sent)) in args_as_sent.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write_str(out, argument);
+                    out.push(':');
+                    write_capped(out, sent);
+                }
+                out.push('}');
+            }
             out.push_str(r#","decision":"#);
             write_decision(out, decision);
         }
@@ -742,6 +772,7 @@ mod tests {
                 ("count", ArgValue::Int(-7)),
                 ("blob", ArgValue::Other),
             ]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(1_755_300_001),
             decision: Decision::Deny(DenialReason::OutOfEnvelope),
         });
@@ -767,6 +798,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 2 },
         });
@@ -776,11 +808,17 @@ mod tests {
         );
         assert_eq!(allowed["args"], serde_json::json!({}));
 
+        assert!(
+            allowed.get("args_as_sent").is_none(),
+            "nothing was normalized, so the key must not appear at all"
+        );
+
         // An engine failure reaches the operator here and nowhere else.
         let failed = line_of(&TraceEvent::CallDecided {
             principal: principal(),
             call_id: CallId(1),
             call: call(&[]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Deny(DenialReason::EvaluationError {
                 detail: "context build failed".into(),
@@ -794,6 +832,71 @@ mod tests {
                 "detail": "context build failed"
             })
         );
+    }
+
+    /// Normalization is lossy, so the line carries the caller's own
+    /// spelling beside the evaluated one — for the arguments where they
+    /// differ, and no others.
+    #[test]
+    fn a_decision_also_records_what_was_asked_for() {
+        let line = line_of(&TraceEvent::CallDecided {
+            principal: principal(),
+            call_id: CallId(4),
+            call: call(&[
+                ("path", ArgValue::Str("c:/users/me/x".into())),
+                ("note", ArgValue::Str("untouched".into())),
+            ]),
+            args_as_sent: [("path".to_string(), r"C:\Users\Me\other\..\x".to_string())]
+                .into_iter()
+                .collect(),
+            now: Timestamp::from_unix_secs(0),
+            decision: Decision::Allow { grant: 0 },
+        });
+        // The decision was made on the evaluated value, and that is still
+        // what `args` holds — replay reads this, not the spelling.
+        assert_eq!(
+            line["args"]["path"],
+            serde_json::json!({"kind": "str", "value": "c:/users/me/x"})
+        );
+        // …and the record can now answer what the agent asked for, which
+        // `args` alone cannot: `..` resolved and case folded away.
+        assert_eq!(line["args_as_sent"]["path"], r"C:\Users\Me\other\..\x");
+        // An argument that normalization left alone is not duplicated.
+        assert!(line["args_as_sent"].get("note").is_none());
+
+        // Two calls whose evaluated form is identical stay distinguishable.
+        let other = line_of(&TraceEvent::CallDecided {
+            principal: principal(),
+            call_id: CallId(5),
+            call: call(&[("path", ArgValue::Str("c:/users/me/x".into()))]),
+            args_as_sent: [("path".to_string(), r"C:\USERS\ME\X".to_string())]
+                .into_iter()
+                .collect(),
+            now: Timestamp::from_unix_secs(0),
+            decision: Decision::Allow { grant: 0 },
+        });
+        assert_eq!(line["args"]["path"], other["args"]["path"]);
+        assert_ne!(line["args_as_sent"], other["args_as_sent"]);
+    }
+
+    /// A spelling is an argument value like any other, so the cap that
+    /// keeps the log from becoming a copy of the data plane applies to it
+    /// too — otherwise a megabyte path would arrive through the back door.
+    #[test]
+    fn an_oversized_spelling_is_capped_like_any_other_value() {
+        let over = "a".repeat(VALUE_CAP + 1);
+        let line = line_of(&TraceEvent::CallDecided {
+            principal: principal(),
+            call_id: CallId(0),
+            call: call(&[("path", ArgValue::Str("/a".into()))]),
+            args_as_sent: [("path".to_string(), over.clone())].into_iter().collect(),
+            now: Timestamp::from_unix_secs(0),
+            decision: Decision::Allow { grant: 0 },
+        });
+        let value = &line["args_as_sent"]["path"];
+        assert_eq!(value["truncated"].as_str().unwrap().len(), VALUE_CAP);
+        assert_eq!(value["bytes"], (VALUE_CAP + 1) as u64);
+        assert!(value["sha256"].as_str().is_some());
     }
 
     #[test]
@@ -929,6 +1032,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[("v", ArgValue::Str(under.clone()))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });
@@ -943,6 +1047,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[("v", ArgValue::Str(over.clone()))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });
@@ -959,6 +1064,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(1),
             call: call(&[("w", ArgValue::Str(over))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });
@@ -972,6 +1078,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[("path", ArgValue::Str(path_max.clone()))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });
@@ -990,6 +1097,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[("v", ArgValue::Str(value.clone()))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });
@@ -1010,6 +1118,7 @@ mod tests {
             principal: principal(),
             call_id: CallId(0),
             call: call(&[("v", ArgValue::Str(nasty.to_owned()))]),
+            args_as_sent: Default::default(),
             now: Timestamp::from_unix_secs(0),
             decision: Decision::Allow { grant: 0 },
         });

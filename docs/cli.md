@@ -287,11 +287,24 @@ another machine, and a stdio child can be in WSL or a container. A grant
 names one tool, and a tool belongs to one upstream, so the grant is
 exactly the scope at which you know the answer.
 
-What normalization does **not** do: no case folding (so on a
-case-insensitive filesystem `/DATA/x` under `/data/` is refused — a lost
-call, never a leaked one), no filesystem access, and **no symlink
-resolution**. Symlinks and hardlinks are outside what a proxy can see;
-that boundary is DESIGN §7's and v0.2's job.
+`windows-path-prefix` also folds **ASCII** case, on the prefix and on the
+value alike: Windows resolves `C:\Users\Me\x` and `c:\users\me\x` to one
+file, so a grant that admits one spelling and refuses the other is
+deciding about the spelling rather than the resource. Declaring the
+flavor declares the whole resolution rule, not just the separator. The
+trace records the folded form, because it records what the decision was
+made on. `path-prefix` folds nothing — POSIX filesystems are
+case-sensitive.
+
+What normalization does **not** do: fold anything outside ASCII (so
+`C:\data\Ä\x` under `C:\data\ä\` is refused — a lost call, never a
+leaked one; full Unicode folding can merge characters Windows keeps
+apart, which would be the opposite kind of mistake), no filesystem
+access, and **no symlink resolution**. Symlinks and hardlinks are outside
+what a proxy can see; that boundary is DESIGN §7's and v0.2's job. One
+more edge worth knowing: an NTFS directory switched to case-sensitive
+(`fsutil file setCaseSensitiveInfo`) can hold two files whose names
+differ only in case, and this normalizer treats them as one.
 
 ### What is refused, and what is only warned about
 
@@ -371,6 +384,14 @@ Neither reaches the upstream. Both are logged (`WARN`) and traced.
 but T4 publishes the trace as a versioned specification and will change
 this shape; nothing should parse it as a contract yet.
 
+**On Windows the file protects itself with nothing** — it inherits the
+parent directory's ACL, and on a volume that has no ACLs (exFAT or FAT,
+which is what most removable and cross-platform drives are formatted as)
+there is nothing to inherit. This file holds the arguments of every call,
+paths included, so put it under a directory you have already restricted —
+on Windows that means an NTFS or ReFS volume. T5's packaging work owns
+the real fix.
+
 Every line has `v`, a dense monotonic `seq`, a wall-clock `ts` in Unix
 milliseconds, a session id (`<start-secs>-<pid>`), and an `event`:
 
@@ -380,19 +401,26 @@ milliseconds, a session id (`<start-secs>-<pid>`), and an `event`:
 | `handshake_completed` | The client's `initialize` was answered | offered and negotiated protocol version, the client's self-reported name/version (untrusted, informational) |
 | `tools_listed` | Each `tools/list` | `offered`, `granted`, and the `now` the filter used |
 | `call_refused` | A `tools/call` refused before any decision | `tool` (when it could be read), `reason`: `malformed_params`, `unknown_tool`, `duplicate_request_id` |
-| `call_decided` | Every authorized call | `tool`, `args` **as evaluated**, `now`, and `decision` |
+| `call_decided` | Every authorized call | `tool`, `args` **as evaluated**, `args_as_sent` when normalization changed a value, `now`, and `decision` |
 | `call_completed` | Every allowed call, exactly once | `outcome`: a result (with `is_error`), an error code, `not_forwarded`, `cancelled`, or `abandoned` |
 | `frame_rejected` | A client frame failed at the parse boundary | the JSON-RPC `code` sent back |
 | `frame_discarded` | A frame the router consumed without forwarding or answering | `kind` |
 | `upstream_ended` | An upstream connection ended | `upstream`, and the failure if it was one |
 | `session_ended` | Last | `reason`, `undelivered`, `delivery_failed` |
 
-Two things about `call_decided` are worth knowing:
+Three things about `call_decided` are worth knowing:
 
 - **The arguments are the ones the decision was made on** — normalized
   (§4), with values the core does not model recorded as a bare type tag.
   A record that disagreed with the decision it records could not
   reproduce it.
+- **`args_as_sent` says what was asked for**, because the evaluated form
+  cannot: normalization is lossy, so `/data/x/../y` and `/data/y`, or two
+  case spellings of one Windows path, evaluate to the same value and
+  would otherwise be the same line. It holds the caller's own spelling
+  for the arguments where the two differ — and only those, so the key is
+  absent from most lines and its presence means normalization changed
+  something. Same 4 KiB cap as any other value.
 - **A string argument longer than 4 KiB is truncated**, and then carries
   its full byte length and the SHA-256 of the whole value. An argument can
   be a megabyte of document text, and an audit log must not become a copy

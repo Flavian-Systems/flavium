@@ -285,8 +285,12 @@ wrong:
 - **Comparison is byte-wise, with no normalization anywhere in this
   crate.** `Prefix("/data/inv")` admits `/data/invalid`: it is a byte
   prefix, not a path-component prefix. `Suffix("yourco.com")` admits
-  `x@evilyourco.com`: write the `@`. Case matters. Path normalization —
-  separators, `.`, `..` — happens in the proxy *before* the value reaches
+  `x@evilyourco.com`: write the `@`. Case matters *here* — the one place
+  it does not is a `windows-path-prefix` argument, and even then the
+  folding happens in the proxy, not in this crate, so both the prefix and
+  the value have already been folded by the time they meet. Path
+  normalization — separators, `.`, `..`, and that ASCII case folding —
+  happens in the proxy *before* the value reaches
   core, and only for arguments a grant declared path-flavored; see
   [proxy-mcp §10](proxy-mcp.md#10-where-enforcement-plugs-in) and
   [cli.md §4](../cli.md#4-grants).
@@ -612,7 +616,7 @@ The catalog, keyed by a per-session monotonic `CallId` the proxy mints:
 | `HandshakeCompleted` | offered and negotiated protocol version, `client_name`, `client_version` | The client's `initialize` was answered. All four are untrusted client data, recorded so protocol drift is observable — **never identity**. |
 | `ToolsListed` | `principal`, `now`, `offered`, `granted` | Each `tools/list`. |
 | `CallRefused` | `principal`, `call_id`, `tool: Option<String>`, `reason` | A `tools/call` refused **before** any grant decision: `MalformedParams`, `UnknownTool`, `DuplicateRequestId`. Protocol-level, not policy. |
-| `CallDecided` | `principal`, `call_id`, `call`, `now`, `decision` | Every authorized call. `call` is the call **as evaluated** — normalized arguments — because a record that disagreed with the decision it records could not reproduce it. |
+| `CallDecided` | `principal`, `call_id`, `call`, `args_as_sent`, `now`, `decision` | Every authorized call. `call` is the call **as evaluated** — normalized arguments — because a record that disagreed with the decision it records could not reproduce it. `args_as_sent` carries the caller's own spelling for the arguments normalization changed, and only those: the evaluated form answers *why was this decided so*, and being lossy it cannot also answer *what was asked for*. |
 | `CallCompleted` | `principal`, `call_id`, `outcome` | Every allowed call, exactly once: `Result{is_error}`, `Error{code}`, `NotForwarded(…)`, `Cancelled`, `Abandoned`. |
 | `FrameRejected` | `code` | A client frame failed at the parse boundary. |
 | `FrameDiscarded` | `kind` | A frame consumed without being forwarded or answered (nine kinds). |
@@ -1020,7 +1024,7 @@ The trace file, verbatim, all eight lines:
 {"v":1,"seq":2,"ts":1786871604493,"session":"1786871604-49216","event":"handshake_completed","offered_protocol_version":"2025-11-25","protocol_version":"2025-11-25","client_name":"doc-spike","client_version":"0.1"}
 {"v":1,"seq":3,"ts":1786871604493,"session":"1786871604-49216","event":"tools_listed","principal":"invoice-bot","now":1786871604,"offered":1,"granted":1}
 {"v":1,"seq":4,"ts":1786871604493,"session":"1786871604-49216","event":"call_decided","principal":"invoice-bot","call_id":0,"now":1786871604,"tool":"read_file","args":{"path":{"kind":"str","value":"/data/invoices/2026-01.pdf"}},"decision":{"kind":"allow","grant":0}}
-{"v":1,"seq":5,"ts":1786871604493,"session":"1786871604-49216","event":"call_decided","principal":"invoice-bot","call_id":1,"now":1786871604,"tool":"read_file","args":{"path":{"kind":"str","value":"/etc/passwd"}},"decision":{"kind":"deny","reason":"out_of_envelope"}}
+{"v":1,"seq":5,"ts":1786871604493,"session":"1786871604-49216","event":"call_decided","principal":"invoice-bot","call_id":1,"now":1786871604,"tool":"read_file","args":{"path":{"kind":"str","value":"/etc/passwd"}},"args_as_sent":{"path":"/data/invoices/../../etc/passwd"},"decision":{"kind":"deny","reason":"out_of_envelope"}}
 {"v":1,"seq":6,"ts":1786871604493,"session":"1786871604-49216","event":"call_refused","principal":"invoice-bot","call_id":2,"tool":"send_mail","reason":"unknown_tool"}
 {"v":1,"seq":7,"ts":1786871604494,"session":"1786871604-49216","event":"call_completed","principal":"invoice-bot","call_id":0,"outcome":{"kind":"result","is_error":false}}
 {"v":1,"seq":8,"ts":1786871604495,"session":"1786871604-49216","event":"session_ended","reason":{"kind":"client_eof"},"undelivered":0,"delivery_failed":false}
@@ -1033,9 +1037,14 @@ Read it against the vocabulary of §8:
   refuses `--trace`: the session's first event is the policy in force,
   and recording an empty one for a session that allowed everything would
   be a false statement in the audit record.
-- `seq 5` records `"/etc/passwd"` — **the call as evaluated**, not as
-  sent. A record that disagreed with the decision it records could not
-  reproduce it.
+- `seq 5` records `"/etc/passwd"` in `args` — **the call as evaluated**.
+  A record that disagreed with the decision it records could not
+  reproduce it. Beside it, `args_as_sent` holds
+  `"/data/invoices/../../etc/passwd"`: the evaluated form is lossy, so on
+  its own it cannot distinguish this traversal from an honest read of
+  `/etc/passwd`, and "what did the agent ask for?" is the other question
+  the record has to answer. It appears only where the two differ — `seq
+  4` sent a path already in normal form and carries no such key.
 - `seq 4` and `seq 5` carry `now: 1786871604`, the *same* instant the
   decision used. Envelope + call + `now` is exactly what a replay needs;
   `ts`, `seq` and `session` are the recorder's additions, which is why

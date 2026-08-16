@@ -37,6 +37,7 @@
 //! and event queues), tool tables are byte-budgeted per upstream, and
 //! everything client-bound funnels through one writer task.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1322,7 +1323,7 @@ impl Session {
         // One clock read, used for the decision and for the event that
         // records it, so replaying that event reproduces the decision.
         let now = enforcement.clock.now();
-        let call = self.evaluated_call(parsed);
+        let (call, args_as_sent) = self.evaluated_call(parsed);
         let decision = enforcement
             .authorizer
             .authorize(enforcement.principal(), &call, now);
@@ -1339,6 +1340,7 @@ impl Session {
             principal: principal.clone(),
             call_id,
             call,
+            args_as_sent,
             now,
             decision: decision.clone(),
         });
@@ -1360,28 +1362,36 @@ impl Session {
     }
 
     /// The call as the core will judge it: the client's arguments, with
-    /// the arguments this grant file marks as paths normalized (D4).
+    /// the arguments this grant file marks as paths normalized (D4), plus
+    /// the spellings the client actually sent for the ones that changed.
     ///
     /// The normalized form is what the decision is made on *and* what the
-    /// trace records, so the record reproduces the decision. The frame
-    /// forwarded upstream is untouched.
-    fn evaluated_call(&self, parsed: &CallParams) -> ToolCall {
+    /// trace records, so the record reproduces the decision. Normalization
+    /// is lossy, though, so that form alone cannot say what was asked for:
+    /// the pre-images ride along beside it, and only for arguments where
+    /// the two differ. The frame forwarded upstream is untouched.
+    fn evaluated_call(&self, parsed: &CallParams) -> (ToolCall, BTreeMap<String, String>) {
         let mut call = ToolCall {
             tool: parsed.name.clone(),
             args: parsed.args.clone(),
         };
+        let mut as_sent = BTreeMap::new();
         let Some(enforcement) = self.enforcement.as_ref() else {
-            return call;
+            return (call, as_sent);
         };
         let Some(flavors) = enforcement.path_flavors.for_tool(&parsed.name) else {
-            return call;
+            return (call, as_sent);
         };
         for (argument, flavor) in flavors {
             if let Some(ArgValue::Str(value)) = call.args.get_mut(argument) {
-                *value = normalize::normalize(value, *flavor);
+                let normalized = normalize::normalize(value, *flavor);
+                if normalized != *value {
+                    as_sent.insert(argument.clone(), std::mem::take(value));
+                }
+                *value = normalized;
             }
         }
-        call
+        (call, as_sent)
     }
 
     async fn on_client_notification(
