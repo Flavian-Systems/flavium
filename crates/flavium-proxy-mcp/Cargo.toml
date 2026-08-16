@@ -9,6 +9,11 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The enforcement vocabulary only — grant types, the reference semantics,
+# the Authorizer and TraceSink traits. flavium-core has no dependencies of
+# its own, so this pulls in nothing: the proxy still does not know Cedar
+# exists, and `cargo tree -p flavium-proxy-mcp` proves it.
+flavium-core = { path = "../flavium-core" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }

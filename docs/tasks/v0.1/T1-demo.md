@@ -4,8 +4,9 @@ The acceptance demo, first run at M1, refreshed at M2, and kept current
 as the proxy evolves: **a real MCP client drives a real MCP server
 through flavium unmodified.** Claude Desktop is the primary client;
 Claude Code is the second one, and both have run this checklist clean
-since M2. Run it after any change to the proxy path, and at M5 again as
-part of the full acceptance run.
+since M2. Run it after any change to the proxy path. The **M5 variant**
+below adds the other half of T1's acceptance — a grant file denying
+out-of-envelope calls, and the trace that records them.
 
 This file is deliberately not named after a milestone: it is one living
 checklist for all of T1, and the runs recorded at the bottom say which
@@ -74,6 +75,14 @@ to verify in the log instead of one.
       and check that both servers' tools appear in one merged list, that
       a call to each routes to the right server, and that a deliberate
       tool-name collision is refused. Worked example below.
+- [ ] *(M5+)* Enforcement: the same session under a grant file — the
+      tool list is filtered, an in-envelope call succeeds, an
+      out-of-envelope one is denied, and both are in the trace. Worked
+      example below.
+
+Note that since M5 the `-- <COMMAND>` shorthand above requires
+`--unenforced`; the M1/M2 rows of this checklist are the unenforced
+proxy, and the M5 section is the enforced one.
 
 ## Checking the wire directly
 
@@ -166,6 +175,97 @@ log must contain
 the proxy refuses ambiguous authority at startup rather than picking a
 winner. Remove the block afterwards.
 
+## M5 variant — the enforcement run
+
+This is the run T1's acceptance criteria are written against: *a real
+client works unmodified through the proxy*, *a grant file denies
+out-of-envelope calls*, and *denials are logged*. The first is the
+checklist above; the other two are here.
+
+Config file (`flavium.toml` at the repo root — gitignored on purpose;
+this file's contents are the only ones that ever appear in the repo).
+Note the single-quoted TOML literal string for the Windows path: it
+avoids doubling every backslash, which matters most in a grant.
+
+```toml
+version = 1
+principal = "desktop-bot"
+
+[[upstream]]
+name = "fs"
+command = ["npx.cmd", "-y", "@modelcontextprotocol/server-filesystem",
+           "C:\\Users\\flavi\\Desktop"]
+
+[[grant]]
+tool = "list_allowed_directories"
+
+[[grant]]
+tool = "read_text_file"
+[grant.args]
+path = { windows-path-prefix = 'C:\Users\flavi\Desktop\flavium-demo\' }
+```
+
+Claude Desktop entry — same as the multi-upstream one, plus a trace:
+
+```json
+"args": ["proxy",
+         "--config", "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\flavium.toml",
+         "--trace",  "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\flavium-trace.jsonl"]
+```
+
+Prepare `C:\Users\flavi\Desktop\flavium-demo\ok.txt` with any content,
+and leave at least one other file directly on the Desktop.
+
+- [ ] **Startup.** The log shows `enforcing grants principal=desktop-bot
+      grants=2` before the upstreams come up, and
+      `all upstreams initialized … enforced=true`.
+- [ ] **The list is filtered.** Claude Desktop shows **2** tools for
+      this server, not the filesystem server's full set — no
+      `write_file`, no `edit_file`, no `move_file`. (The upstream still
+      offers them; the client is not shown them.)
+- [ ] **In-envelope call succeeds.** "Read
+      `C:\Users\flavi\Desktop\flavium-demo\ok.txt`" returns the file's
+      contents.
+- [ ] **Out-of-envelope call is denied.** "Read the other file on my
+      Desktop" (any path outside `flavium-demo\`) comes back as a tool
+      error reading `denied by policy`; the model can see the denial and
+      usually says so. The log has a
+      `WARN … call denied tool=read_text_file … reason=arguments outside
+      the grant envelope` line.
+- [ ] **Traversal is denied too** — the row the path flavor exists for.
+      Ask for
+      `C:\Users\flavi\Desktop\flavium-demo\..\<the other file>`; it must
+      be denied, and the trace must record the *normalized* path
+      (`C:/Users/flavi/Desktop/<the other file>`), not the one that was
+      typed. This is the check that a byte-prefix comparison alone would
+      fail.
+- [ ] **An ungranted tool is invisible and unusable.** Asking to write a
+      file gets "no such tool" from the model; if a call is made by hand
+      it answers `-32602 Unknown tool: write_file` — the same bytes as a
+      tool no upstream offers.
+- [ ] **The trace.** `flavium-trace.jsonl` has one JSON object per line,
+      `seq` dense from 1, beginning `session_started` (with the envelope)
+      and ending `session_ended`, with a `call_decided` for every call
+      above and a `call_completed` for each allowed one. On unix the file
+      is `0600`; on Windows it inherits the directory's ACL (noted as a
+      known gap — see below).
+
+Two things worth eyeballing in the trace, because they are what the
+record exists for: the `args` of a denied call are the values the
+decision was made on (normalized), and the allow/deny pair for the same
+tool sits under one `principal` with distinct `call_id`s.
+
+**What this run is the first evidence for.** `windows-path-prefix` was
+verified against flavium's own normalizer, never against
+`server-filesystem`'s path resolution. This is where the two meet. If a
+path that flavium normalizes one way resolves another way inside the
+upstream, that is a false allow or a false denial and it shows up here
+first — the flavor map is one module (`normalize.rs`) if it must change.
+
+**Known gap, Windows.** The trace file is created `0600` on unix only;
+on Windows it inherits the parent directory's ACL. Put it somewhere
+already protected until the packaging work in T5.
+
 ## Negotiated protocol version — record here
 
 Since M2 there are two negotiations. The **client-face** version is
@@ -214,5 +314,12 @@ duplicate `fs2` block, all three upstreams initialized and the proxy
 then refused service with
 `proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
 Claude Desktop reporting the server disconnected.
+
+M5 run: **not yet performed.** The M5 code landed with the scripted and
+end-to-end suites green (including the real Cedar engine and a real
+trace file in `proxy_e2e.rs`), but the enforcement variant above is a
+manual run against Claude Desktop on Windows and is still owed. It is
+the first contact between `windows-path-prefix` and a real filesystem
+server; record the result — and any flavor correction it forces — here.
 
 Current pin: **2025-11-25**.

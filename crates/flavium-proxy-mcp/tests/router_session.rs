@@ -1,4 +1,4 @@
-//! Scripted-session integration tests for the T1/M2 protocol-terminating
+//! Scripted-session integration tests for the T1 protocol-terminating
 //! router.
 //!
 //! The router runs over in-memory pipes: the test plays the client on
@@ -10,198 +10,55 @@
 //! round-trip byte-identically (ids are rewritten, so identity is
 //! asserted at body level).
 //!
+//! Since M5 every session here also runs **through the grant gate**, on a
+//! permissive envelope: the assertions are unchanged from M2, so a
+//! regression in byte identity shows up as a failure rather than as an
+//! edited expectation. What the gate itself decides is
+//! `enforcement_gate.rs`.
+//!
 //! Frame fixtures are ASCII-only raw strings; non-ASCII content is
 //! injected via Rust escapes so no fixture can silently pick up
 //! mis-encoded bytes from the source file.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod support;
+
 use std::time::Duration;
 
-use flavium_proxy_mcp::router::{
-    self, PreparedUpstream, ProxyConfig, RunError, SessionEnd, SessionSummary, StartupError,
-};
-use flavium_proxy_mcp::transport::{StdioTransport, Transport};
+use flavium_proxy_mcp::router::{self, ProxyConfig, RunError, SessionEnd, StartupError};
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::task::JoinHandle;
+use support::{
+    answer_tools_list, boot_upstream, client_handshake, envelope, finish, grant, test_config,
+    text_of, wire, Harness, PINNED_PROTOCOL_VERSION,
+};
 
-/// Pinned protocol version — recorded live from the M1 Claude Desktop
-/// demo on 2026-08-15 (docs/tasks/v0.1/T1-demo.md). Keep in sync
-/// with proxy_e2e.rs and the scripted_upstream example.
-const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
+/// Every tool the M1/M2 fixtures declare, granted without constraints.
+///
+/// These tests are about protocol wiring and byte identity, so the
+/// envelope must not be what changes their answers — but the gate is in
+/// the path on every call, which makes this suite the regression net M5
+/// owes **W5**: normalization changes the decision, never the frame.
+const FIXTURE_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "send_mail",
+    "delete_mail",
+    "echo",
+    "slow",
+    "alpha_tool",
+    "beta_tool",
+    "late_tool",
+];
 
-fn test_config() -> ProxyConfig {
-    ProxyConfig {
-        shutdown_grace: Duration::from_millis(250),
-        init_timeout: Duration::from_secs(5),
-        list_timeout: Duration::from_secs(5),
-        ..ProxyConfig::default()
-    }
-}
-
-/// One side of a scripted peer: what the test writes and reads.
-struct Pipe {
-    /// Test → proxy bytes.
-    tx: DuplexStream,
-    /// Proxy → test bytes.
-    rx: DuplexStream,
-}
-
-impl Pipe {
-    async fn send(&mut self, frame: &str) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            self.tx.write_all(frame.as_bytes()).await.unwrap();
-            self.tx.write_all(b"\n").await.unwrap();
-        })
-        .await
-        .expect("timed out writing frame");
-    }
-
-    async fn send_raw(&mut self, bytes: &[u8]) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            self.tx.write_all(bytes).await.unwrap();
-        })
-        .await
-        .expect("timed out writing bytes");
-    }
-
-    /// Reads one `\n`-terminated frame, byte-for-byte.
-    async fn recv(&mut self) -> Vec<u8> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut frame = Vec::new();
-            let mut byte = [0u8; 1];
-            loop {
-                let n = self.rx.read(&mut byte).await.unwrap();
-                assert!(n != 0, "unexpected EOF while reading a frame");
-                if byte[0] == b'\n' {
-                    return frame;
-                }
-                frame.push(byte[0]);
-            }
-        })
-        .await
-        .expect("timed out reading frame")
-    }
-
-    async fn recv_json(&mut self) -> Value {
-        let frame = self.recv().await;
-        serde_json::from_slice(&frame).expect("peer received invalid JSON")
-    }
-
-    async fn expect_eof(&mut self) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut buf = [0u8; 64];
-            let n = self.rx.read(&mut buf).await.unwrap();
-            assert_eq!(
-                n,
-                0,
-                "expected EOF, got {:?}",
-                String::from_utf8_lossy(&buf[..n])
-            );
-        })
-        .await
-        .expect("timed out waiting for EOF");
-    }
-}
-
-/// The test harness: the router over in-memory pipes, the test holding
-/// the client end and both upstream ends.
-struct Harness {
-    client: Pipe,
-    upstreams: Vec<Pipe>,
-    router: JoinHandle<Result<SessionSummary, RunError>>,
-}
-
-/// Spawns the router with `n` scripted stdio upstreams named
-/// `upstream-0`, `upstream-1`, …
+/// Spawns the router with `n` scripted stdio upstreams, enforcing
+/// [`FIXTURE_TOOLS`].
 fn spawn_router(config: ProxyConfig, n: usize) -> Harness {
-    let (client_tx, router_client_rx) = tokio::io::duplex(1 << 16);
-    let (router_client_tx, client_rx) = tokio::io::duplex(1 << 16);
-
-    let mut upstreams = Vec::new();
-    let mut prepared = Vec::new();
-    for i in 0..n {
-        let (test_tx, transport_rx) = tokio::io::duplex(1 << 16);
-        let (transport_tx, test_rx) = tokio::io::duplex(1 << 16);
-        upstreams.push(Pipe {
-            tx: test_tx,
-            rx: test_rx,
-        });
-        prepared.push(PreparedUpstream {
-            name: format!("upstream-{i}"),
-            transport: Transport::stdio(StdioTransport::from_streams(
-                transport_rx,
-                transport_tx,
-                config.max_frame_bytes,
-            )),
-        });
-    }
-
-    let router = tokio::spawn(router::run(
-        config,
-        prepared,
-        router_client_rx,
-        router_client_tx,
-    ));
-    Harness {
-        client: Pipe {
-            tx: client_tx,
-            rx: client_rx,
-        },
-        upstreams,
-        router,
-    }
-}
-
-/// Answers one upstream's initialize + initialized exchange, asserting
-/// the proxy's client face toward upstreams: fresh handshake, empty
-/// (attenuated) capabilities, flavium identity.
-async fn boot_upstream(pipe: &mut Pipe, server_name: &str, instructions: Option<&str>) {
-    let init = pipe.recv_json().await;
-    assert_eq!(init["method"], "initialize");
-    assert_eq!(init["params"]["protocolVersion"], PINNED_PROTOCOL_VERSION);
-    assert_eq!(
-        init["params"]["capabilities"],
-        serde_json::json!({}),
-        "upstreams must see attenuated (empty) client capabilities"
+    let wired = wire(
+        envelope(FIXTURE_TOOLS.iter().map(|tool| grant(tool)).collect()),
+        1_000,
     );
-    assert_eq!(init["params"]["clientInfo"]["name"], "flavium");
-    let id = init["id"].clone();
-
-    let mut result = serde_json::json!({
-        "protocolVersion": PINNED_PROTOCOL_VERSION,
-        "capabilities": { "tools": { "listChanged": true } },
-        "serverInfo": { "name": server_name, "version": "1.0" },
-    });
-    if let Some(text) = instructions {
-        result["instructions"] = Value::String(text.to_owned());
-    }
-    let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
-    pipe.send(&reply.to_string()).await;
-
-    let initialized = pipe.recv_json().await;
-    assert_eq!(initialized["method"], "notifications/initialized");
-    assert!(initialized.get("id").is_none());
-}
-
-/// Answers one `tools/list` request with a raw result payload (kept as
-/// a string so tests control the exact bytes).
-async fn answer_tools_list(pipe: &mut Pipe, expect_cursor: Option<&str>, result_raw: &str) {
-    let list = pipe.recv_json().await;
-    assert_eq!(list["method"], "tools/list");
-    match expect_cursor {
-        None => assert!(
-            list.get("params").is_none() || list["params"].get("cursor").is_none(),
-            "unexpected cursor in {list}"
-        ),
-        Some(cursor) => assert_eq!(list["params"]["cursor"], cursor),
-    }
-    let id = list["id"].as_i64().expect("proxy ids are integers");
-    pipe.send(&format!(
-        r#"{{"jsonrpc":"2.0","id":{id},"result":{result_raw}}}"#
-    ))
-    .await;
+    support::spawn(config, n, Some(wired))
 }
 
 /// Boots the standard two-upstream fixture:
@@ -233,43 +90,6 @@ async fn boot_standard(h: &mut Harness) {
         r#"{"tools": [{"name": "send_mail", "inputSchema": {"type": "object"}}]}"#,
     )
     .await;
-}
-
-/// Runs the client-side initialize + initialized handshake.
-async fn client_handshake(h: &mut Harness) -> Value {
-    h.client
-        .send(concat!(
-            r#"{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"#,
-            r#""protocolVersion": "2025-11-25", "capabilities": {"roots": {"listChanged": true}}, "#,
-            r#""clientInfo": {"name": "scripted-client", "version": "9.9.9"}}}"#
-        ))
-        .await;
-    let reply = h.client.recv_json().await;
-    h.client
-        .send(r#"{"jsonrpc": "2.0", "method": "notifications/initialized"}"#)
-        .await;
-    reply
-}
-
-/// Ends the session from the client side and returns the summary.
-async fn finish(mut h: Harness) -> SessionSummary {
-    h.client.tx.shutdown().await.unwrap();
-    // The router closes each upstream child's stdin (EOF from the
-    // upstream's point of view); scripted upstreams close their output
-    // in response, completing the shutdown handshake.
-    for pipe in &mut h.upstreams {
-        pipe.expect_eof().await;
-        pipe.tx.shutdown().await.unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(5), h.router)
-        .await
-        .expect("router did not shut down")
-        .expect("router task panicked")
-        .expect("router returned an error")
-}
-
-fn text_of(frame: &[u8]) -> &str {
-    std::str::from_utf8(frame).expect("frame is not UTF-8")
 }
 
 #[tokio::test]

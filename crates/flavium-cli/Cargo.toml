@@ -12,10 +12,17 @@ authors.workspace = true
 name = "flavium"
 path = "src/main.rs"
 
+# `sha2` was approved in chat on 2026-08-16 for the trace's truncation
+# digest; T4's hash-chained recorder needs a cryptographic hash anyway, so
+# this is an early dependency rather than a new one. It is spent here, in
+# the CLI — the enforcement core does not grow.
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+flavium-core = { path = "../flavium-core" }
+flavium-policy = { path = "../flavium-policy" }
 flavium-proxy-mcp = { path = "../flavium-proxy-mcp" }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 toml = "1"
 tracing = "0.1"

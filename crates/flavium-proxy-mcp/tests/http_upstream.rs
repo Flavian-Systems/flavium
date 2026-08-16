@@ -11,6 +11,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod support;
+
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -319,12 +321,24 @@ fn spawn_router_over_http(
     let transport = Transport::http(
         HttpTransport::new("http-upstream", url, &[], config.max_frame_bytes).unwrap(),
     );
+    // The gate is in the path here too: an HTTP upstream's tools are
+    // granted unconstrained, so these tests still measure the transport.
+    let wired = support::wire(
+        support::envelope(
+            ["http_echo", "sse_tool"]
+                .iter()
+                .map(|tool| support::grant(tool))
+                .collect(),
+        ),
+        1_000,
+    );
     let join = tokio::spawn(router::run(
         config,
         vec![PreparedUpstream {
             name: "http-upstream".to_owned(),
             transport,
         }],
+        Some(wired.enforcement),
         router_rx,
         router_tx,
     ));
