@@ -437,6 +437,23 @@ async fn normalized_paths_inside_the_prefix_are_allowed() {
         "{:?}",
         decisions(&events)
     );
+
+    // p1 was already in normal form, so nothing is duplicated for it; the
+    // six that were rewritten each keep the spelling they arrived with.
+    // The rows in order: p1 p2 p3 p4 p5 p6 p7.
+    let sent: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            TraceEvent::CallDecided { args_as_sent, .. } => Some(!args_as_sent.is_empty()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [false, true, true, true, true, true, true],
+        "only a value normalization actually changed gets an `args_as_sent` entry"
+    );
+
     let summary = finish(h).await;
     assert_eq!(summary.frames_to_upstream, 7);
 }
@@ -463,6 +480,28 @@ async fn normalization_changes_the_decision_never_the_frame() {
     // …while the decision, and the record of it, used the normalized
     // form.
     assert_eq!(last_decided_path(&h.events()), "/data/invoices/2026-01.pdf");
+
+    // And because that form is lossy, the record also keeps the spelling
+    // the client sent — otherwise this call and a plain read of the same
+    // file would be one line in the log, and an auditor could not tell a
+    // traversal attempt from an ordinary request.
+    let sent = h
+        .events()
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            TraceEvent::CallDecided { args_as_sent, .. } => Some(args_as_sent.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        sent.get("path").map(String::as_str),
+        Some("/data/./invoices//sub/../2026-01.pdf")
+    );
+    assert!(
+        !sent.contains_key("note"),
+        "`note` is not path-flavored, so nothing about it changed"
+    );
 
     let upstream_id: Value = serde_json::from_slice(&forwarded).unwrap();
     let upstream_id = upstream_id["id"].as_i64().unwrap();

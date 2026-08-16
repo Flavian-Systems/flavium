@@ -379,15 +379,17 @@ its root — refused it. Correct behavior on both sides, and the reason
 the folding change is worded as it is: folding promises only that
 flavium is not the one refusing on spelling.
 
-It also exposes a limit of the record worth knowing before T4 builds on
-it. The two reads in that session were traced with **identical** `args`,
-one served and one refused upstream, because the trace stores the value
-the decision was made on and the difference between them was case. The
-record still reproduces the decision (D9), but it cannot show what the
-agent actually asked for, and no other artifact can either — Claude
-Desktop's MCP log does not record params. Carrying the pre-normalization
-value alongside the normalized one, when they differ, is the obvious
-remedy and is a trace-schema question for T4 rather than a proxy fix.
+It also exposed a limit of the record, **since fixed**. The two reads in
+that session were traced with identical `args`, one served and one
+refused upstream, because the trace stored only the value the decision
+was made on and the difference between them was case. The record
+reproduced the decision (D9) but could not show what the agent asked
+for, and no other artifact could either — Claude Desktop's MCP log does
+not record params. `call_decided` now carries `args_as_sent` beside
+`args`, holding the caller's own spelling for the arguments
+normalization changed and only those. Re-running this session on a build
+with that field is not required to re-tick the rows above; the two reads
+would simply no longer be one line.
 
 **Known gap, Windows.** The trace file is created `0600` on unix only;
 on Windows it inherits the parent directory's ACL. Put it somewhere
