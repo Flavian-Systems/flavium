@@ -205,6 +205,25 @@ is the source of truth for architecture; this file only fixes the words.
   run, because a grant over a local directory that admitted the UNC
   spelling of the same first segment would let an agent write to a remote
   server — and hand that server the upstream's credentials.
+- **Admits** — the "does this pass?" direction, over one *value*. A
+  constraint admits an argument value (`Constraint::admits`); a grant
+  admits a call when the call names its tool and every constraint admits
+  the call's value for its argument (`Grant::admits`), a missing argument
+  being `None`. Total and fail closed: every (constraint, value) pair
+  yields a `bool`, and missing, wrong-typed and unmodelled values are not
+  admitted.
+- **Includes** — the "is this narrower?" direction, over one *argument*:
+  does the parent's constraint admit every value the child's admits
+  (`Constraint::includes`)? A structural table, not a solver — see
+  *attenuation* for why sound-but-incomplete is the deliberate choice.
+- **Covers** — the same question over one *grant*: is everything the
+  child grant authorizes also authorized by the parent (`Grant::covers`)?
+  Three axes in a fixed order — tool, expiry, then, for every argument
+  the **parent** constrains, that the child constrains it too and the
+  parent's constraint *includes* the child's. A child may add
+  constraints; it may never drop or widen one. `attenuates` is this,
+  lifted to sets: every child grant must be covered by at least one
+  parent grant.
 - **Grant envelope** — the union of an agent's grants: the precomputable
   worst case of what it can do (`flavium_core::GrantEnvelope`:
   principal + grants, in file order).
