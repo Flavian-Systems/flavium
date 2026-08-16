@@ -222,6 +222,15 @@ one axis that always differs. DESIGN's five-tuple (principal, tool,
 constraints, expiry, budget) is not lost — it is `GrantEnvelope.principal
 × Grant`, with budget reserved for T2 (M3/D7).
 
+**And it carries no upstream.** `flavium-core` has no concept of one:
+which server serves `read_file` is the proxy's routing table (`ToolSet`,
+name → upstream index), and the authorizer is never told which one it is
+— its resource is `Flavium::Tool::"read_file"`. Authority and topology
+meet at the tool name and nowhere else, which is why two upstreams
+offering the same name are refused at startup (a grant would otherwise
+name two different tools) and why an upstream's `name` is never
+prepended to a tool's.
+
 **Grant order is significant and stable.** `grants` is a `Vec` in file
 order, indices appear in `Decision::Allow { grant }` and in the trace, and
 they become Cedar policy ids. Nothing re-sorts or dedupes it.

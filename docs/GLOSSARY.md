@@ -25,7 +25,8 @@ is the source of truth for architecture; this file only fixes the words.
 - **Upstream** — one tool server the proxy fronts: a spawned child
   process (stdio) or a streamable-HTTP endpoint. Named in config
   (`[[upstream]] name = "fs"`); the name appears in logs and errors
-  only, never in tool names.
+  only — never in tool names, and never in a *grant*, which reaches a
+  tool by name alone.
 - **Multi-upstream** — one proxy session fronting several upstreams at
   once: their tool lists are merged into one, and each `tools/call` is
   routed to the upstream that owns the tool name.
@@ -149,7 +150,10 @@ is the source of truth for architecture; this file only fixes the words.
   constraints + expiry (+ budget, T2). The unit of authority in flavium
   (`flavium_core::Grant`, M3); DESIGN's tuple (principal, tool,
   constraints, expiry, budget) is the envelope's principal × the grant.
-  Cedar-backed and enforced on every call since M5.
+  Cedar-backed and enforced on every call since M5. It names a **tool,
+  never an upstream**: the tool name is the only vocabulary grants and
+  upstreams share, which is unambiguous exactly because a *collision* is
+  refused rather than resolved.
 - **Grant file** — the operator-written `flavium.toml`: a `version`, a
   `principal`, the `[[upstream]]` tables, and one `[[grant]]` table per
   authority granted. It is the *only* language flavium asks anyone to
