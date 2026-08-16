@@ -68,7 +68,9 @@ struct ProxyCmd {
     #[arg(long, conflicts_with = "trace")]
     unenforced: bool,
 
-    /// Append a JSONL trace of the session to this file (created 0600).
+    /// Append a JSONL trace of the session to this file (created 0600 on
+    /// unix; on Windows it inherits the directory's ACL, if the volume has
+    /// one at all).
     #[arg(long, value_name = "FILE")]
     trace: Option<PathBuf>,
 

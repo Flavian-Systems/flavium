@@ -384,6 +384,14 @@ Neither reaches the upstream. Both are logged (`WARN`) and traced.
 but T4 publishes the trace as a versioned specification and will change
 this shape; nothing should parse it as a contract yet.
 
+**On Windows the file protects itself with nothing** — it inherits the
+parent directory's ACL, and on a volume that has no ACLs (exFAT or FAT,
+which is what most removable and cross-platform drives are formatted as)
+there is nothing to inherit. This file holds the arguments of every call,
+paths included, so put it under a directory you have already restricted —
+on Windows that means an NTFS or ReFS volume. T5's packaging work owns
+the real fix.
+
 Every line has `v`, a dense monotonic `seq`, a wall-clock `ts` in Unix
 milliseconds, a session id (`<start-secs>-<pid>`), and an `event`:
 

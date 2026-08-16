@@ -425,8 +425,12 @@ the grant, and reading the two as one thing is the natural mistake —
 the envelope is narrower than anything the upstream will tell you.
 
 **Known gap, Windows.** The trace file is created `0600` on unix only;
-on Windows it inherits the parent directory's ACL. Put it somewhere
-already protected until the packaging work in T5.
+on Windows it inherits the parent directory's ACL. Worth checking which
+volume that directory is on before assuming there is one: exFAT and FAT
+carry no ACLs at all, so a trace written there is protected by nothing —
+and the repo used for these runs lives on an exFAT drive, which is
+exactly the mistake that is easy to make. Put it somewhere already
+protected, on NTFS or ReFS, until the packaging work in T5.
 
 ## Negotiated protocol version — record here
 

@@ -39,6 +39,13 @@
 //!   so an existing file keeps whatever permissions it already had —
 //!   point `--trace` at a fresh path, or at a directory that is already
 //!   protected.
+//!
+//!   **On Windows the file gets no protection of its own**: it inherits
+//!   the parent directory's ACL. On a volume with no ACLs at all — exFAT
+//!   or FAT, which removable and cross-platform drives usually are — there
+//!   is nothing to inherit, and the trace is as readable as anything else
+//!   on that drive. Choose the directory deliberately; packaging (T5)
+//!   owns the real fix.
 //! - **A string argument longer than [`VALUE_CAP`] is truncated**, and
 //!   then — and only then — carries its full byte length and the SHA-256
 //!   of the whole value. An argument can be a megabyte of document text,

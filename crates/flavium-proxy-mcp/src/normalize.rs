@@ -43,6 +43,15 @@
 //! which is the side this module always errs to. `PathFlavor::Posix` folds
 //! nothing.
 //!
+//! Windows *does* fold beyond ASCII, and deliberately not matching it is
+//! the point: it folds through an upcase table written **into the volume
+//! at format time** — `$UpCase` on NTFS, the Up-case Table on exFAT — so
+//! which non-ASCII characters are one name is a property of that volume
+//! and of the Windows version that formatted it, not a constant. A proxy
+//! cannot read it either: an upstream may be another machine. `A`–`Z` is
+//! the subset every such table agrees on, so it is the subset that can be
+//! folded without guessing.
+//!
 //! Folding does not promise that the upstream will *serve* a path, only
 //! that flavium is not the one refusing it on spelling: an upstream may
 //! run its own case-sensitive check (`@modelcontextprotocol/server-filesystem`
