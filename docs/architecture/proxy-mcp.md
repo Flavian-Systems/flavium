@@ -72,8 +72,9 @@ real clients. M5 put the gate in that path: between routing a call and
 forwarding it, an `Authorizer` answers, and the answer — allow or deny —
 is a trace event before anything else happens. The crate still does not
 know Cedar exists; it holds two `flavium-core` traits and the CLI decides
-what is behind them (§10). Budgets (T2), delegation (T3) and the
-hash-chained recorder (T4) are still ahead.
+what is behind them (§10). Budgets on the tool path (T2a), the model
+boundary on its own face (T2b), delegation (T3) and the hash-chained
+recorder (T4) are still ahead.
 
 ## 2. Module map
 
@@ -833,7 +834,9 @@ into Cedar. What follows is only the seam.
 - **Deliberately deferred beyond T1:** upstream supervision and restart
   policies (T3 — today any upstream ending ends the session); tool
   namespacing (`server.tool`) as the collision fallback; an HTTP *server*
-  face; SSE resumability; the 2026-07-28 protocol revision; budgets (T2);
+  face for MCP (the OpenAI-compatible one is T2b's, and is not this
+  crate's); SSE resumability; the 2026-07-28 protocol revision; budgets
+  (T2a);
   the hash-chained recorder, replay, and the published trace spec (T4);
   the fuzz harness over `framing`/`sse`/`envelope`/`splice` — and now
   `normalize` and `args`, both written pure and total for it (T5).

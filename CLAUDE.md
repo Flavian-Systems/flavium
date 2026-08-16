@@ -27,12 +27,13 @@ core and future formal-verification target**. In these two crates:
   to upstream tool servers)
 - `crates/flavium-cli` — the `flavium` binary
 
-The budget axis is **T2 and not modelled yet** — no `budget` field on
+The budget axis is **T2a and not modelled yet** — no `budget` field on
 `Grant`, no metering in flavium-policy, and a `budget` key in a grant
 file is a startup error rather than a silently accepted one. DESIGN §4's
-"Cedar evaluation plus stateful budget metering, both must pass" is where
-this lands; do not write it as though it already does. How the two crates
-work today: [docs/architecture/core-and-policy.md](docs/architecture/core-and-policy.md).
+"Cedar evaluation plus stateful budget metering, both must pass" is what
+T2a builds on the tool path and T2b on the model path; until they land,
+do not write it as though it already holds. How the two crates work
+today: [docs/architecture/core-and-policy.md](docs/architecture/core-and-policy.md).
 
 ## Workflow (matches CI exactly)
 
@@ -54,11 +55,16 @@ work today: [docs/architecture/core-and-policy.md](docs/architecture/core-and-po
 - Rust stable, edition 2021. Errors: `thiserror` in libraries; no panics
   on the request path — every denial is a typed result that reaches the
   trace.
-- Every grant decision, denial, budget tick, spawn, and termination is a
-  trace event. If you add behavior that isn't traced, it isn't done.
-- Security posture: this is a security tool. No telemetry, no network
-  calls except those the proxy exists to mediate, no new external
-  endpoints. Parser-facing code (MCP JSON-RPC) gets fuzz coverage.
+- Every grant decision, denial, budget tick, model call, spawn, and
+  termination is a trace event. If you add behavior that isn't traced,
+  it isn't done.
+- Security posture: this is a security tool. No telemetry, and no network
+  calls except those the proxy exists to mediate. Listening sockets are
+  the one part of that rule v0.1 changes: it acquires exactly one, T2b's
+  OpenAI-compatible endpoint, declared in DESIGN §7. Any further inbound
+  endpoint needs the same explicit declaration first — never a silent
+  addition. Parser-facing code (MCP JSON-RPC, and T2b's HTTP/SSE face)
+  gets fuzz coverage.
 - Tests: unit tests beside code; integration tests under `tests/`;
   property-style tests for invariants where feasible. A feature without a
   failing-case test (what gets *denied*) is incomplete.

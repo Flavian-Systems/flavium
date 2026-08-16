@@ -6,7 +6,7 @@
 
 **Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written.
 
-**What works today: an enforcing multi-upstream MCP proxy.** `flavium` presents an MCP server to any stdio client (Claude Desktop, Claude Code, …) and fronts one or more upstream tool servers — local processes *and* streamable-HTTP endpoints — merging their tools into one list and routing every call by tool name, with `params`/`result` bodies crossing byte-faithfully. On top of that, since T1/M5: the client is shown **only the tools your grant file names**, **every `tools/call` is authorized before it is forwarded** (argument prefixes and suffixes, value sets, numeric ranges, required-absent arguments, expiry — with path arguments normalized so `../` cannot walk out of a granted directory), and every decision, denial and refusal can be **recorded to a JSONL trace**. A config file with no grants refuses to start. Budgets (T2), attenuated delegation (T3) and the hash-chained recorder (T4) are the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
+**What works today: an enforcing multi-upstream MCP proxy.** `flavium` presents an MCP server to any stdio client (Claude Desktop, Claude Code, …) and fronts one or more upstream tool servers — local processes *and* streamable-HTTP endpoints — merging their tools into one list and routing every call by tool name, with `params`/`result` bodies crossing byte-faithfully. On top of that, since T1/M5: the client is shown **only the tools your grant file names**, **every `tools/call` is authorized before it is forwarded** (argument prefixes and suffixes, value sets, numeric ranges, required-absent arguments, expiry — with path arguments normalized so `../` cannot walk out of a granted directory), and every decision, denial and refusal can be **recorded to a JSONL trace**. A config file with no grants refuses to start. Budgets on the tool path (T2a), the model boundary (T2b), attenuated delegation (T3) and the hash-chained recorder (T4) are the tasks behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
 
 ```bash
 flavium proxy --config flavium.toml --trace flavium-trace.jsonl
@@ -78,8 +78,8 @@ Enforcement deepens over time without changing the policy model: proxy enforceme
 
 | Phase | Target |
 |---|---|
-| v0.1 | Grants, namespaces, budgets, attenuated delegation, flight recorder; MCP proxy; injection demo |
-| v0.2 | Kernel-level sandboxing; LLM proxy with mid-generation budget kills; deterministic replay tooling |
+| v0.1 | Grants, namespaces, budgets, attenuated delegation, flight recorder; MCP proxy; OpenAI-compatible model proxy with mid-generation budget kills; deterministic replay; injection demo |
+| v0.2 | Kernel-level sandboxing; replay debugging tooling; first design partners |
 | v0.3 | Wasm isolation; machine-checked confinement core; compliance/audit exports |
 
 See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest boundaries; [docs/architecture/core-and-policy.md](docs/architecture/core-and-policy.md) for the enforcement core — what a grant is, what it means, how it attenuates, and how it becomes a Cedar policy, with one grant followed end to end from a line of TOML to a line of trace; and [docs/architecture/proxy-mcp.md](docs/architecture/proxy-mcp.md) for how the MCP proxy crate is built — modules, tasks, message flows, invariants.

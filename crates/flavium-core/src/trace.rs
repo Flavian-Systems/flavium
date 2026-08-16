@@ -9,8 +9,9 @@
 //! Design points, so sinks and future variants stay consistent:
 //!
 //! - **Exhaustive on purpose.** [`TraceEvent`] is *not* `#[non_exhaustive]`:
-//!   a sink must handle every variant at compile time, so adding one (T2
-//!   budgets, T3 spawn/termination) is a wanted compile-error ripple through
+//!   a sink must handle every variant at compile time, so adding one (T2a
+//!   budget ticks, T2b model calls, T3 spawn/termination) is a wanted
+//!   compile-error ripple through
 //!   every sink, never a silently unserialized event.
 //! - **Clock-free.** An event carries what enforcement computed, including
 //!   the `now` a decision was made with (replaying the decision needs

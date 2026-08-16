@@ -18,8 +18,9 @@ forwarded, and every decision can be recorded to a JSONL trace. A config
 file with no grants refuses to start — the transparent middlebox is
 available, but only when you ask for it by name (`--unenforced`).
 
-Budgets (T2), delegation (T3) and the hash-chained recorder (T4) are
-still ahead.
+Budgets on the tool path (T2a), the model boundary with its token and
+spend budgets (T2b), delegation (T3) and the hash-chained recorder (T4)
+are still ahead.
 
 ## Contents
 
@@ -324,7 +325,7 @@ differ only in case, and this normalizer treats them as one.
 Refused at startup, because a malformed file could mean anything:
 
 - a missing or unrecognised `version`;
-- an unknown key anywhere, including `budget` (the T2 axis is
+- an unknown key anywhere, including `budget` (the T2a axis is
   deliberately not modelled yet — accepting a key it cannot enforce
   would be a lie);
 - zero or two constraint keys on one argument, or `absent = false`;
@@ -562,8 +563,11 @@ these is not implemented. Full table with sources in the
 
 Stated so nobody hunts for a flag that does not exist:
 
-- **No budgets** — T2. A `budget` key in a grant is an error, not a
+- **No budgets** — call-count and wall-clock caps are T2a, token and
+  spend caps T2b. A `budget` key in a grant is an error today, not a
   silently ignored field.
+- **No model boundary** — no `/v1/chat/completions` face, no model
+  backends, no token or spend accounting — T2b.
 - **No delegation or sub-agents** — T3.
 - **No hash-chained recorder, no replay, no published trace spec** — T4.
   The JSONL of §6 is unstable.
@@ -575,7 +579,8 @@ Stated so nobody hunts for a flag that does not exist:
 - **No tool namespacing** — colliding names are refused.
 - **No upstream supervision or restart** — an upstream ending ends the
   session (T3).
-- **No HTTP *server* face** — the client side is stdio only.
+- **No HTTP *server* face** — the MCP client side is stdio only; the
+  OpenAI-compatible face that first makes flavium listen is T2b.
 - **No SSE resumability** on HTTP upstreams; a dropped response stream
   yields a synthesized error for that request.
 - **The 2026-07-28 MCP revision** is not spoken on either face.

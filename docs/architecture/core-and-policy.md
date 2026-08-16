@@ -220,7 +220,7 @@ had the principal stayed inside `Grant`, the headline invariant ("child ⊆
 parent on every axis") would have needed a permanent exception for the
 one axis that always differs. DESIGN's five-tuple (principal, tool,
 constraints, expiry, budget) is not lost — it is `GrantEnvelope.principal
-× Grant`, with budget reserved for T2 (M3/D7).
+× Grant`, with budget reserved for T2a (M3/D7).
 
 **And it carries no upstream.** `flavium-core` has no concept of one:
 which server serves `read_file` is the proxy's routing table (`ToolSet`,
@@ -362,7 +362,7 @@ lets leak sideways.
 
 **`Allow` names the first admitting live grant**, in envelope order, and
 `admitting_grants` returns *all* of them. The distinction is not
-cosmetic: under T2's per-grant budgets the meter will want the first
+cosmetic: under T2a's per-grant budgets the meter will want the first
 admitting grant *with budget left*, and `admitting_grants` exists so that
 can be built without changing `Decision` (M3/D7).
 
@@ -601,8 +601,9 @@ pub trait TraceSink: Send + Sync {
 Four design points, so sinks and future variants stay consistent (M3/D6):
 
 - **Exhaustive on purpose.** `TraceEvent` is *not* `#[non_exhaustive]`.
-  A sink must handle every variant at compile time, so adding one — T2
-  budgets, T3 spawn and termination — is a wanted compile-error ripple
+  A sink must handle every variant at compile time, so adding one — T2a
+  budget ticks, T2b model calls, T3 spawn and termination — is a wanted
+  compile-error ripple
   through every sink, never a silently unserialized event. The audit
   record is the one thing that may not have silent gaps.
 - **Clock-free.** An event carries what enforcement computed, including
@@ -950,7 +951,7 @@ Three things happen here and nowhere else:
   one second *earlier* — the fail-closed direction.
 - **Ambiguity is refused while an operator is watching.** Zero or two
   constraint keys on one argument, `absent = false`, a `range` with
-  neither bound, `budget` (the T2 axis, deliberately not modelled), the
+  neither bound, `budget` (the T2a axis, deliberately not modelled), the
   same `(tool, argument)` constrained both as a path and as bytes — all
   startup errors. Grants that can only ever *deny* — an empty `one-of`, a
   `min` above its `max`, a tool no upstream offers — are warnings, kept.
@@ -1136,12 +1137,12 @@ Cedar engine** and a real trace file on disk.
 
 ## 15. Adding an axis
 
-The next two milestones each add an axis to the model, and both touch
-these crates. What follows is the checklist that falls out of the
+T2a and T3 each add an axis to the model, and T2b adds units to T2a's;
+all three touch these crates. What follows is the checklist that falls out of the
 invariants above — useful as a worked example of what "every change must
 state which invariant it preserves" means in practice.
 
-**T2, budgets** (`budget 5/day` in DESIGN §3). The axis is *reserved*,
+**T2a, budgets on the tool path** (`budget 5/day` in DESIGN §3). The axis is *reserved*,
 not modelled: `Grant` has no `budget` field, and a `budget` key in a
 grant file is a startup error rather than a silently accepted one
 (M3/D7). A field that is parsed but not enforced is a lie told in the
@@ -1154,7 +1155,18 @@ every sink by design; and the meter itself, which is stateful and
 therefore *not* in core — `decide` must stay pure. Note that
 `admitting_grants` already returns every matching index precisely so the
 meter can pick the first admitting grant *with budget left* without
-changing `Decision`.
+changing `Decision`. T2a's units are tool-call counts and wall-clock.
+
+**T2b, the model boundary.** No new *axis*: the same `Axis::Budget` carries
+token and spend caps beside T2a's call counts and wall-clock, each cap in
+its own unit, and the same `upper_bound_within` arm attenuates them. What
+*is* new in core is trace vocabulary — a model call and a generation cut
+mid-stream are events, and every sink must handle them: the same wanted
+compile-error ripple as above. Everything else T2b adds is a second
+protocol face, and lives outside these crates. The reason it is worth
+naming here: the axis has to be shaped for every set of units the first
+time it is written, because a second widening of a field on `Grant` is a
+second change to the verification target.
 
 **T3, delegation.** `attenuates` is already the check a spawn will run;
 what T3 adds is the spawn itself, trace events for spawn and termination
@@ -1170,7 +1182,7 @@ lives behind `TraceSink` — the hash chain, sequence numbers, the session
 identifier, and the published, versioned trace specification that makes
 today's JSONL stable.
 
-The rule that governs all three: `flavium-core` and `flavium-policy` are
+The rule that governs every one of them: `flavium-core` and `flavium-policy` are
 the enforcement core and the formal-verification target. Adding a
 dependency to either needs explicit human approval; every change states
 which invariant it preserves; and boring, obvious code wins over clever
