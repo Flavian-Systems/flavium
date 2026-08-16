@@ -14,7 +14,7 @@
 
 /// The newest protocol revision the proxy speaks, offered on both
 /// faces. Matches the version pinned live in the M1 demo
-/// (docs/tasks/v0.1/T1-m1-demo.md).
+/// (docs/tasks/v0.1/T1-demo.md).
 pub const OFFERED_VERSION: &str = "2025-11-25";
 
 /// Every protocol revision the proxy accepts a session in.

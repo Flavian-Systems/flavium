@@ -225,7 +225,7 @@ merged tool list and the negotiated protocol version.
 
 The recorded runs against real clients — what was checked and what
 they answered — are in
-[docs/tasks/v0.1/T1-m1-demo.md](tasks/v0.1/T1-m1-demo.md).
+[docs/tasks/v0.1/T1-demo.md](tasks/v0.1/T1-demo.md).
 
 ## 8. Fixed limits
 

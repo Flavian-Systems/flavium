@@ -1,10 +1,15 @@
-# T1 — manual demo checklist (Claude Desktop)
+# T1 — manual demo checklist
 
-The acceptance demo, first run at M1 and kept current as the proxy
-evolves: **Claude Desktop drives a real MCP server through flavium
-unmodified.** Run it after any change to the proxy path, and at M5
-again as part of the full acceptance run (with Claude Code as the
-second real client).
+The acceptance demo, first run at M1, refreshed at M2, and kept current
+as the proxy evolves: **a real MCP client drives a real MCP server
+through flavium unmodified.** Claude Desktop is the primary client;
+Claude Code is the second one, and both have run this checklist clean
+since M2. Run it after any change to the proxy path, and at M5 again as
+part of the full acceptance run.
+
+This file is deliberately not named after a milestone: it is one living
+checklist for all of T1, and the runs recorded at the bottom say which
+milestone each belongs to.
 
 Since M2 the proxy **terminates MCP on both faces** (see
 [docs/GLOSSARY.md](../../GLOSSARY.md)): flavium answers the client's

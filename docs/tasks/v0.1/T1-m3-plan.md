@@ -30,108 +30,238 @@ touch-ups (T1 plan status/M3 note, architecture doc §10 sentence, glossary).
 reserved, D7); spawn/supervision (T3 — but `attenuates` is its check);
 serde/JSONL (CLI, M5); hash chain, `ts`/`seq`/session id (recorder, M5/T4).
 
-## Design decisions (each a sentence you may want to veto)
+## Design decisions
 
-- **D1 — Principal factored out of `Grant`.** `GrantEnvelope { principal,
-  grants }` is what an agent holds; `Grant { tool, constraints, expires }`
-  is pure authority. DESIGN's tuple = `GrantEnvelope.principal × Grant`.
-  Attenuation compares authority; who may hold a child envelope is T3's
-  spawn check. `attenuates` therefore takes `&[Grant]`.
-- **D2 — Reference semantics live in core (type-homes deviation, flagged
-  in the T1 plan note).** `GrantEnvelope::decide(&ToolCall, now) ->
-  Decision` is the executable specification of "outside the envelope";
-  Cedar (M4) is the runtime engine, differential-tested against it. Without
-  it INV-1 is only algebraic; with it we test the theorem's local form.
-- **D3 — Constraint vocabulary = the T1 acceptance table + `Absent`.**
-  `Constraint::{Prefix(String), Suffix(String), OneOf(BTreeSet<String>),
-  Range{min: Option<i64>, max: Option<i64>}, Absent}` — one constraint per
-  argument name (`BTreeMap<String, Constraint>`); `admits(Option<&ArgValue>)`
-  so `Absent` admits exactly "argument missing" (the only way to forbid
-  `cc`/`bcc` — the exfiltration case the demo needs; adding it later would
-  change `decide`'s core rule). `ArgValue::{Str(String), Int(i64), Other}`,
-  `Other` = anything no constraint can admit (float, bool, null, array,
-  object). Rules, all fail-closed: constrained arg missing ⇒ deny (also
-  blocks default-argument escapes); type mismatch or `Other` ⇒ deny; byte-wise
-  string comparison, no normalization (path normalization stays in M5,
-  ahead of the check); unconstrained args are not looked at. Rustdoc pitfalls
-  spelled out: `Prefix("/data/inv")` admits `/data/invalid` (byte prefix,
-  not path component); write suffixes with `@`; a scalar recipient holding
-  several addresses passes `Suffix` — the T5 tool takes one address;
-  list-valued args are `Other` in T1.
-- **D4 — Attenuation is ⊆ (equal allowed) and conservative.**
-  `attenuates(parent: &[Grant], child: &[Grant]) -> Result<(), Uncovered{child:
-  usize}>` is sound, not complete (may refuse a semantic subset, never
-  accepts a non-subset; a child grant covered only by the *union* of two
-  parent grants is refused). Pairwise `Grant::covers(&self, child) ->
-  Result<(), Axis::{Tool, Expiry, Constraint(arg)}>` in a fixed order (tool
-  → expiry → constraints in key order); diagnostics are per candidate parent
-  (advisory). `Constraint::includes(&self, other)` is a structural table:
-  same-kind rows; `OneOf ⊆ Prefix/Suffix`; `Absent ⊆ Absent`; a "parent
-  admits all strings" pre-row (`Prefix("")`/`Suffix("")` include any
-  string-kind child); everything else `false`. Bounds and expiry are compared
-  by two explicit 4-row `match` helpers (`lower_bound_within`,
-  `upper_bound_within`) — never derived `Option` `Ord`, whose `None < Some`
-  would accept a never-expiring child under an expiring parent.
-- **D5 — Traits in core, no I/O.** `Authorizer: Send + Sync { authorize(&self,
-  &Principal, &ToolCall, Timestamp) -> Decision; granted_tools(&self,
-  &Principal, Timestamp) -> BTreeSet<ToolName> }` — home moved from
-  flavium-policy to core (deviation, flagged) so the proxy depends on core
-  only and never on Cedar; M4's Cedar authorizer implements it; `impl
-  Authorizer for GrantEnvelope` is the reference (rustdoc: specification, not
-  the runtime engine). `TraceSink: Send + Sync { record(&self, &TraceEvent)
-  -> Result<(), Box<dyn Error + Send + Sync>> }` — fallible on purpose
-  (recommended M5 policy: sink failure ends the session — fail closed on
-  audit); blanket `impl for Arc<T>`; documented ordering contract (the
-  router emits from one task in causal order, so a sink may assign
-  `seq`/prev-hash under its lock). `MemorySink` (std `Mutex`,
-  poison-tolerant) and `NullSink` ship in core.
-- **D6 — Trace catalog defined now, exhaustive enum.** Deliberately not
-  `#[non_exhaustive]`: every sink handles every variant at compile time (a
-  T2/T3 addition is a wanted ripple). Events are clock-free (decisions
-  carry the `now` they used); `ts`/`seq`/hash/session id are the recorder's.
-  Catalog (all `Clone + Debug + PartialEq + Eq`), keyed by a per-session
-  `CallId(u64)` the proxy mints:
-  `SessionStarted{envelope}` · `HandshakeCompleted{offered_protocol_version,
-  protocol_version, client_name, client_version}` (untrusted data, recorded
-  so protocol drift is observable) · `ToolsListed{principal, now, offered:
-  u64, granted: u64}` · `CallRefused{principal, call_id, tool:
-  Option<String>, reason: RefusalReason::{MalformedParams, UnknownTool,
-  DuplicateRequestId}}` · `CallDecided{principal, call_id, call: ToolCall,
-  now, decision}` · `CallCompleted{principal, call_id, outcome:
-  CallOutcome::{Result{is_error}, Error{code}, NotForwarded{UpstreamBusy |
-  UpstreamUnavailable | Untranslatable}, Cancelled, Abandoned}}` ·
-  `FrameRejected{code}` · `FrameDiscarded{kind: DiscardKind::{StrayResponse,
-  UnroutableNotification, StaleResponse, CancelUnreadable, CancelNotInFlight,
-  CancelNotForwarded, NotificationBeforeReady, UnknownResponseId,
-  OutOfScopeProgress}}` · `UpstreamEnded{upstream, error: Option<String>}` ·
-  `SessionEnded{reason: SessionEndReason::{ClientEof, ClientReadError,
-  ClientWriteFailed, UpstreamGone{upstream}, ToolCollision{tool}, Internal},
-  undelivered: u64, delivery_failed: bool}` (clean iff `ClientEof` and not
-  `delivery_failed` — the exit-code criterion). A run that fails during
-  startup has no session and leaves no trace (logs + exit code only). This
-  is the T1 acceptance row "trace event (principal,
-  tool, reason)" for every denial *and* refusal, and I11's counters as
-  events. `CallDecided.call` carries the args `decide` saw (replay of the
-  decision needs exactly envelope + call + now); size/redaction is an M5/T4
-  sink knob, noted there.
-- **D7 — Budget axis deferred to T2.** No `budget` field: an accepted but
-  unenforced `max_calls` would be a lie. `Grant` rustdoc reserves it; T2 adds
-  `Axis::Budget`, extends `covers`, adds `DenialReason::OverBudget`. Noted
-  for T2: "first admitting grant" becomes load-bearing under per-grant
-  budgets — hence `admitting_grants` (below) so `Decision` stays stable.
-- **D8 — Time.** `Timestamp(i64)` unix seconds (Cedar `long`, chrono
-  `timestamp()`); no arithmetic impls; live iff `now < expires` (boundary =
-  expired). Callers supply `now`; core has no clock.
-- **D9 — Names.** `Principal`, `ToolName`: validated newtypes (non-empty, no
-  ASCII control chars), `new(&str) -> Result<_, InvalidName>`, `Display`,
-  `Borrow<str>` (set lookups by `&str`). Only *grants* use `ToolName`;
-  `ToolCall.tool` and trace tool fields are `String` — an upstream/client
-  name that would fail validation can never equal a grant's name ⇒
-  `NotGranted`, fail closed, no special path.
-- **D10 — Zero dependencies, dev-deps included.** Property tests use a
-  10-line SplitMix64 PRNG and small-scope generators. If you prefer
-  `proptest` (shrinking), that is a dev-dependency needing your explicit
-  approval — say so and D10 flips.
+Each decision states what it is, why, and what it rules out. All ten
+shipped as written unless a note says otherwise; the deviations from the
+[T1 plan](T1-mcp-proxy-core.md) (D1, D2, D3's `Absent`, D5, D6, D7) are
+recorded in its status note. Vocabulary is fixed in
+[GLOSSARY.md](../../GLOSSARY.md).
+
+### D1 — The principal belongs to the envelope, not to the grant
+
+**Decision.** `GrantEnvelope { principal, grants }` is what an agent holds;
+`Grant { tool, constraints, expires }` is pure authority with no holder.
+`attenuates` therefore takes `&[Grant]`, not envelopes.
+
+**Why.** Attenuation compares *authority*, and a child envelope is held by a
+different principal by construction. Had the principal stayed inside `Grant`,
+the headline invariant — "child ⊆ parent on every axis" — would have needed a
+permanent exception for the one axis that always differs, which is exactly the
+kind of footnote that makes a security claim unverifiable. DESIGN's five-tuple
+is not lost: it is `GrantEnvelope.principal × Grant`.
+
+**Instead of.** Keeping principal in the grant (invariant with an exception),
+or making `attenuates` compare envelopes (conflates two questions: *is this
+authority narrower* — here — and *may this parent hand it to that child* —
+T3's spawn check).
+
+### D2 — The reference semantics live in core
+
+**Decision.** `GrantEnvelope::decide(&ToolCall, now) -> Decision` — about a
+hundred lines of deliberately boring code — is in `flavium-core` and is the
+executable specification of what a grant means. Cedar (M4) is the runtime
+engine and is tested against it. Flagged as a deviation from the T1 plan's
+"type homes" line.
+
+**Why.** Something has to *define* the meaning of a prefix constraint. If only
+the engine defines it, there is nothing to test the engine against, and INV-1
+(attenuation soundness) can only be checked algebraically — which is precisely
+the kind of test that would have let an unsound `includes` row through. With
+`decide` in core, M4 gets a differential test ("Cedar agrees with the
+specification, on thousands of random cases") and the attenuation property gets
+a semantic oracle.
+
+**Instead of.** Authorization living only in `flavium-policy` (the T1 plan's
+original split). The rustdoc is explicit that `decide` is the specification and
+not the engine, so nobody mistakes it for the enforcement path.
+
+### D3 — Constraint vocabulary = the T1 acceptance table, plus `Absent`
+
+**Decision.** `Constraint::{Prefix, Suffix, OneOf, Range{min, max}, Absent}`,
+one per argument name, over `ArgValue::{Str, Int, Other}` where `Other` is
+anything no constraint can admit (float, bool, null, array, object). All rules
+fail closed: a constrained argument that is missing, of the wrong type, or
+`Other` is not admitted; comparison is byte-wise with no normalization (path
+normalization happens in M5, before the check); arguments no constraint names
+are not examined.
+
+**Why.** The first four kinds are exactly the axes the T1 acceptance table
+names (path prefixes, recipient patterns, numeric ranges, expiry). `Absent` was
+added during planning because the fail-closed rule has a consequence that only
+shows up when you write a real grant: *any* constraint on `cc` forces every
+call to supply `cc`, so there was no way to say "this argument must not be
+supplied" — which is precisely the exfiltration hole the flagship demo has to
+close. Adding it later would have changed `decide`'s core rule inside the
+verification target, which is the most expensive kind of late change.
+
+**Instead of.** A general expression language for constraints (a bespoke
+policy DSL, explicitly out of scope — we use Cedar), or deferring `Absent`.
+
+**Pitfalls, spelled out in the rustdoc** because they are authoring traps, not
+bugs: `Prefix("/data/inv")` admits `/data/invalid` (it is a byte prefix, not a
+path component); write suffixes with the `@`; one scalar argument holding
+several addresses still passes `Suffix`, so the T5 demo tool takes exactly one
+recipient; list-valued arguments are `Other` in T1.
+
+### D4 — Attenuation is ⊆ (equality allowed) and conservative
+
+**Decision.** `attenuates(parent: &[Grant], child: &[Grant]) -> Result<(),
+Uncovered>` is **sound but not complete**: it never accepts a child that can do
+something the parent cannot, but it may refuse a child that is semantically a
+subset (notably one covered only by the *union* of two parent grants). Per
+grant, `Grant::covers` checks tool → expiry → constraints in a fixed order;
+per argument, `Constraint::includes` is a structural table (same-kind rows,
+`OneOf ⊆ Prefix/Suffix`, `Absent ⊆ Absent`, an "admits every string" pre-row
+for `Prefix("")`/`Suffix("")`, everything else false). Bounds and expiry are
+compared by two explicit four-row `match` helpers.
+
+**Why.** Soundness is the property the theorem needs; completeness is a
+convenience. Refusing a subset that happens to be written in a shape the table
+does not recognise costs an operator a more explicit grant file — it never
+costs authority, and it never grants any. The explicit bound helpers exist
+because the obvious one-liner is wrong in a way that is invisible on the page:
+derived `Ord` on `Option` puts `None` *below* every `Some`, so
+`child.expires <= parent.expires` would accept a **never-expiring child under
+an expiring parent**. That single line is the bug class this crate exists not
+to have, so it is written as a table and mutation-tested.
+
+**Instead of.** A complete inclusion check (cross-kind reasoning,
+union-of-parents coverage): more code and more to verify, in the one crate
+where both are most expensive, for no gain in what can be authorised.
+
+### D5 — Both traits live in core, with no I/O
+
+**Decision.** `Authorizer` (authorize + granted_tools) and `TraceSink`
+(fallible `record`) are defined in `flavium-core`, with `MemorySink`/`NullSink`
+and blanket impls for `Arc<T>`. `impl Authorizer for GrantEnvelope` is the
+reference implementation. Flagged as a deviation: the T1 plan put the
+authorization trait in `flavium-policy`.
+
+**Why.** If the trait lived in `flavium-policy`, then `flavium-proxy-mcp` would
+have to depend on `flavium-policy` — and therefore compile Cedar's ~50 crates —
+merely to *name* the type it calls, and proxy tests could not run without
+Cedar. Putting the seam in the dependency-free crate keeps the arrow pointing
+one way and lets proxy tests use the reference implementation as a double.
+`TraceSink::record` is fallible on purpose: it lets the runtime fail closed on
+audit (the recommended M5 policy is that a sink failure ends the session — a
+full disk should stop the agent, not run it unrecorded).
+
+**Instead of.** The trait in `flavium-policy` (drags Cedar into the proxy), or
+an infallible sink (makes "if it isn't traced, it isn't done" unenforceable).
+
+### D6 — The whole trace catalog is defined now, as an exhaustive enum
+
+**Decision.** `TraceEvent` ships complete in M3 rather than accreting through
+M5, and is deliberately **not** `#[non_exhaustive]`. Events are clock-free: a
+decision carries the `now` it was made with, while `ts`, `seq`, hashes and the
+session id belong to the recorder.
+
+**Why.** The T1 acceptance criterion wants a trace event for every denial *and*
+every refusal, and the architecture doc's I11 says the router's counters become
+events — so M5 needs the entire vocabulary on its first day; defining it later
+would mean a second `flavium-core` PR inside a milestone whose scope is proxy
+wiring, and each change to the verification target is a ceremony. Exhaustive so
+that adding a variant in T2 or T3 is a compile error in every sink rather than
+an event that silently fails to be written. Clock-free because replaying a
+decision needs exactly envelope + call + `now`, and a core that reads the clock
+is neither replayable nor verifiable.
+
+**Instead of.** `#[non_exhaustive]` plus accretion (silent gaps in the audit
+record, which is the one thing an audit record may not have).
+
+Catalog (all `Clone + Debug + PartialEq + Eq`), keyed by a per-session
+`CallId(u64)` the proxy mints: `SessionStarted{envelope}` ·
+`HandshakeCompleted{offered_protocol_version, protocol_version, client_name,
+client_version}` (untrusted data, recorded so protocol drift is observable) ·
+`ToolsListed{principal, now, offered: u64, granted: u64}` ·
+`CallRefused{principal, call_id, tool: Option<String>, reason:
+RefusalReason::{MalformedParams, UnknownTool, DuplicateRequestId}}` ·
+`CallDecided{principal, call_id, call: ToolCall, now, decision}` ·
+`CallCompleted{principal, call_id, outcome: CallOutcome::{Result{is_error},
+Error{code}, NotForwarded{UpstreamBusy | UpstreamUnavailable |
+Untranslatable}, Cancelled, Abandoned}}` · `FrameRejected{code}` ·
+`FrameDiscarded{kind: DiscardKind::{StrayResponse, UnroutableNotification,
+StaleResponse, CancelUnreadable, CancelNotInFlight, CancelNotForwarded,
+NotificationBeforeReady, UnknownResponseId, OutOfScopeProgress}}` ·
+`UpstreamEnded{upstream, error: Option<String>}` ·
+`SessionEnded{reason: SessionEndReason::{ClientEof, ClientReadError,
+ClientWriteFailed, UpstreamGone{upstream}, ToolCollision{tool}, Internal},
+undelivered: u64, delivery_failed: bool}` (clean iff `ClientEof` and not
+`delivery_failed` — the exit-code criterion).
+
+A run that fails during startup has no session and leaves no trace (logs and
+exit code only). `CallDecided.call` carries the arguments `decide` saw, since
+replaying a decision needs exactly envelope + call + `now`; trace size and
+redaction are an M5/T4 sink knob, noted there.
+
+### D7 — The budget axis waits for T2
+
+**Decision.** `Grant` has no `budget` field in M3. Its rustdoc reserves the
+axis; T2 adds it together with `Axis::Budget`, an extension to `covers`, and
+`DenialReason::OverBudget`.
+
+**Why.** A grant file that accepts `max_calls = 5` and does not enforce it is
+a lie told in the security-critical artifact — worse than an unsupported key,
+because the operator believes they are protected. "Every axis" in M3 therefore
+means tool, constraints and expiry, and says so.
+
+**Instead of.** Modelling the field now and enforcing later (a documented
+gap that reads as a feature).
+
+**Note for T2.** Under per-grant budgets, `decide`'s "first admitting grant"
+becomes load-bearing: the meter will want the first admitting grant *with
+budget left*. `admitting_grants` (all matching indices, not just the first)
+exists so that can be done without changing `Decision`.
+
+### D8 — Time is an `i64` of Unix seconds, supplied by the caller
+
+**Decision.** `Timestamp(i64)` seconds since the epoch, comparison only (no
+arithmetic impls). A grant is live iff `now < expires`, so the boundary
+instant is already expired. Core never reads a clock; every time-dependent
+function takes `now`.
+
+**Why.** `i64` seconds is what Cedar's `long` and the usual `timestamp()`
+accessors both speak, so no conversion can go wrong at the M4 boundary. A core
+with no clock is what makes decisions replayable (T4 re-runs a session by
+feeding back the recorded `now`) and what keeps the verification target free of
+ambient state. Strict `<` makes the boundary unambiguous in one direction
+rather than "it depends".
+
+**Instead of.** `SystemTime`/`Instant` (not serialisable, not comparable
+across a replay, and an invitation to read the clock inside core).
+
+### D9 — Grants use validated names; calls and traces use plain strings
+
+**Decision.** `Principal` and `ToolName` are newtypes validated on
+construction (non-empty, no ASCII control characters), with `Display` and
+`Borrow<str>`. Only *grants* use them; `ToolCall.tool` and the tool fields of
+trace events stay `String`.
+
+**Why.** Names travel into log lines, JSONL records and Cedar entity ids, so a
+control character inside a *grant* is worth refusing at the door. But the name
+in a call arrives from the client and is attacker-influenced: validating it
+there would add an error path and a new client-visible failure for no gain,
+because an unrepresentable name simply cannot equal any grant's name and
+therefore falls out as `NotGranted`. Fail closed, no special case.
+
+**Instead of.** Validating the call's tool name (a new error path that changes
+the denial surface), or using `String` everywhere (loses the guarantee exactly
+where names are written down).
+
+### D10 — Zero dependencies, dev-dependencies included
+
+**Decision.** The property suite uses a ten-line SplitMix64 generator and
+hand-written generators rather than a property-testing crate.
+
+**Why.** CLAUDE.md makes `flavium-core` dependency-light by rule, and a
+*test* dependency is not free in a crate whose point is auditability: anyone
+reproducing the proofs has to vendor and trust it too, and it appears in the
+supply chain of the verification target.
+
+**Instead of.** `proptest` — whose shrinking is genuinely better than what a
+fixed seed gives us. The offer stands: it is a dev-dependency needing explicit
+approval, and D10 flips the moment that is granted.
 
 ## Crate layout (`crates/flavium-core/src/`)
 
