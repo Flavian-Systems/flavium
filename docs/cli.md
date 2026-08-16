@@ -204,6 +204,19 @@ offending upstream or grant where there is one.
 One `[[grant]]` table is authority over one tool. Several grants may name
 the same tool; a call is allowed if **any** live grant admits it.
 
+**A grant names a tool, never an upstream.** The two kinds of table in
+this file do not reference each other: `[[upstream]]` says where tools
+come from, `[[grant]]` says what may be done with one, and the tool
+*name* is the only thing they share. That join is unambiguous only
+because collisions are refused (§3) — two upstreams offering `read_file`
+would make one grant mean two different things, and ambiguous routing is
+ambiguous authority — which is also why an upstream's `name` is never
+prepended to a tool's. So the two sets need not overlap, and each
+mismatch has its own answer: a grant for a tool no upstream offers is a
+startup warning, and an offered tool no grant names is filtered out of
+`tools/list` and answers a call exactly as a nonexistent tool does —
+both below.
+
 ```toml
 [[grant]]
 tool = "send_mail"
