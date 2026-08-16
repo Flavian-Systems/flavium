@@ -243,11 +243,17 @@ user to write Cedar — grants are compiled into it.
   context is always four keys: `str` and `int` (the call's arguments by
   type), `present` (the names of every argument supplied, which is how
   `Absent` is expressed), and `now`. Always emitting all four is what
-  keeps evaluation from erroring on a missing attribute.
+  keeps evaluation from erroring on a missing attribute. It is built
+  from Cedar `RestrictedExpression`s rather than from JSON, because
+  Cedar's JSON *value* grammar reserves `__expr`/`__entity`/`__extn`:
+  argument names come from the client, so a name that a parser treats as
+  a keyword must never reach one.
 - **`has` guard** — Cedar's attribute-existence test
-  (`context.str has path`). Every constraint flavium emits is guarded by
-  one, so an argument that is missing or of the wrong type fails the
-  guard and denies, rather than raising an evaluation error.
+  (`context.str has path`). Every constraint that reads an argument's
+  *value* is guarded by one, so an argument that is missing or of the
+  wrong type fails the guard and denies, rather than raising an
+  evaluation error. (`Absent` needs no guard: it asks whether a name is
+  in `present`, which is a set membership test and cannot error.)
 - **`like` / wildcard pattern** — Cedar's string matcher, where `*`
   matches any sequence. Prefix and suffix constraints compile to it. The
   pattern is emitted **structurally** (a literal plus a wildcard), so

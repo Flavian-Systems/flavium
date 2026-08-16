@@ -1,12 +1,28 @@
 [package]
 name = "flavium-policy"
-description = "Flavium policy (pre-v0.1 skeleton)"
+description = "Flavium policy engine: compiles grant envelopes into Cedar policies and answers authorization questions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+
+# The three dependencies approved in the T1 plan, and no more. Cedar is the
+# mandated engine (DESIGN.md §6); serde_json is how policies, entity UIDs and
+# the request context are built structurally instead of as text; thiserror is
+# the workspace's library-error convention.
+#
+# The version range is the workspace's usual semver-compatible one rather than
+# an `=` pin: the drift the plan worries about is a change to the EST or to the
+# diagnostics API, and both are caught loudly here — an API change fails to
+# compile, and an encoding change fails the `a_representative_grant_renders_as_expected`
+# test in tests/encoding.rs.
+[dependencies]
+cedar-policy = "4.12"
+flavium-core = { path = "../flavium-core" }
+serde_json = "1"
+thiserror = "2"
 
 [lints]
 workspace = true

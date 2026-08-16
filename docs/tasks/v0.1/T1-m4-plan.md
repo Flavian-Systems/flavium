@@ -1,10 +1,41 @@
 # T1 / M4 — flavium-policy: grant→Cedar compiler + authorizer (plan)
 
-Status: **draft 2026-08-16, awaiting approval.** Milestone 4 of the approved
+Status: **approved 2026-08-16, implemented.** Milestone 4 of the approved
 [T1 plan](T1-mcp-proxy-core.md); builds on [M3](T1-m3-plan.md). Every Cedar
 shape below was verified against cedar-policy 4.12 in a throwaway spike before
 this plan was written — the "verified" notes are things that were *run*, not
 recalled.
+
+Three things came out different from the plan below, all forced by what the
+implementation found. They are recorded here rather than edited into the
+decisions, so the plan still reads as what was approved:
+
+1. **`request_context` returns a `Context`, not a `serde_json::Value`** (the
+   crate-layout table says otherwise). D3's shape is unchanged — the same four
+   keys — but the context is built from `RestrictedExpression`s instead of
+   JSON. The JSON path was a real P1 break: `__expr` is a reserved escape in
+   Cedar's *value* grammar, so a call whose only string argument was named
+   `__expr` made the whole context fail to parse, and the engine denied a call
+   the specification allows. Argument names are client-supplied and validated
+   nowhere, so this was reachable from outside. P4 is restated in the crate
+   docs as "nothing is ever parsed" rather than "nothing is ever interpolated":
+   not being *formatted* into a grammar is no protection if you are still
+   *read* by one.
+2. **The `when` condition is a balanced tree of `&&`, not a left fold.** A
+   grant with sixteen constrained arguments — an ordinary tool signature —
+   overflowed the stack during Cedar's recursive parse and aborted the
+   process. Halving makes the depth `log2(N)`; 4096 constrained arguments now
+   compile. Reassociating is sound because every conjunct is total by
+   construction. This changes the rendered form, which is what the
+   compiled-form test exists to make visible.
+3. **`cedar-policy = "4.12"`** is a caret range, not an `=` pin, matching every
+   other dependency in the workspace. The drift the risk section cares about is
+   caught either way: an API change fails to compile, an encoding change fails
+   `a_representative_grant_renders_as_expected`.
+
+Both defects were found by the adversarial review this plan calls for, and
+both now have regression tests (`__expr` in the differential suite's hostile
+universe; 16/64/4096 constrained arguments in `tests/encoding.rs`).
 
 ## Context
 
