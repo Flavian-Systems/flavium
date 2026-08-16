@@ -169,6 +169,16 @@ pub enum TraceEvent {
         client_name: Option<String>,
         /// The client's self-reported version, if any.
         client_version: Option<String>,
+        /// How many upstreams' `instructions` were withheld from the
+        /// client at this handshake.
+        ///
+        /// A count, not the text: the text is untrusted upstream content,
+        /// and the audit question is whether anything was disclosed, not
+        /// what it said. Counted for the same reason
+        /// [`TraceEvent::ToolsListed`] counts `offered` against
+        /// `granted` — a withholding is a decision, and an untraced
+        /// decision did not happen.
+        upstream_instructions_withheld: u64,
     },
     /// The client asked for the tool list and was shown the granted subset.
     ToolsListed {

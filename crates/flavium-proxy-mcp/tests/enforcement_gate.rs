@@ -513,6 +513,96 @@ async fn a_nul_in_a_path_argument_is_denied_and_recorded_as_sent() {
     );
 }
 
+/// **W2** reaches the handshake: `instructions` does not cross.
+///
+/// The finding this closes: visibility ⊆ authority was enforced only in
+/// `on_tools_list`. `on_initialize` copied each upstream's `instructions`
+/// string into the proxy's own result without consulting `enforcement` —
+/// and MCP servers routinely enumerate their tools in that field. The
+/// handshake therefore disclosed exactly the names the filtered
+/// `tools/list` and the byte-identical unknown-tool denial exist to
+/// withhold. Every enforced fixture booted with `instructions: None`,
+/// which is why 289 tests did not see it.
+#[tokio::test]
+async fn the_handshake_does_not_leak_ungranted_tools_through_instructions() {
+    const LEAKY: &str = "Tools: read_file, delete_file, move_file. \
+                         Use delete_file to remove a path.";
+
+    let mut h = spawn(
+        test_config(),
+        1,
+        Some(wire_paths(gate_envelope(), 1_000, flavors())),
+    );
+    boot_upstream(&mut h.upstreams[0], "fixture", Some(LEAKY)).await;
+    let declared: Vec<String> = OFFERED
+        .iter()
+        .map(|name| format!(r#"{{"name": "{name}", "inputSchema": {{"type": "object"}}}}"#))
+        .collect();
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        &format!(r#"{{"tools": [{}]}}"#, declared.join(", ")),
+    )
+    .await;
+
+    let init = client_handshake(&mut h).await;
+    assert!(
+        init["result"].get("instructions").is_none(),
+        "the handshake disclosed upstream instructions: {init}"
+    );
+    // Not merely absent from that field — the name is nowhere in the
+    // frame the client received.
+    let frame = init.to_string();
+    assert!(
+        !frame.contains("ungranted_tool") && !frame.contains("delete_file"),
+        "an ungranted tool name reached the client: {frame}"
+    );
+    // The filtered list still behaves as before, so this is the
+    // handshake closing, not the list opening.
+    let names = list_names(&mut h).await;
+    assert!(!names.contains(&"ungranted_tool".to_owned()));
+
+    // The withholding is a decision, so it is in the trace — as a count,
+    // never the upstream's free text.
+    let events = h.events();
+    let withheld = events
+        .iter()
+        .find_map(|event| match event {
+            TraceEvent::HandshakeCompleted {
+                upstream_instructions_withheld,
+                ..
+            } => Some(*upstream_instructions_withheld),
+            _ => None,
+        })
+        .expect("no handshake was recorded");
+    assert_eq!(withheld, 1);
+    assert!(
+        !format!("{events:?}").contains("delete_file"),
+        "the trace copied the upstream's instructions text"
+    );
+
+    finish(h).await;
+}
+
+/// An unenforced session is deliberately unchanged: there is no envelope
+/// for `instructions` to exceed, and no trace to record it in.
+#[tokio::test]
+async fn an_unenforced_handshake_still_forwards_instructions() {
+    let mut h = spawn(test_config(), 1, None);
+    boot_upstream(&mut h.upstreams[0], "fixture", Some("Alpha rules.")).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+
+    let init = client_handshake(&mut h).await;
+    assert_eq!(init["result"]["instructions"], "Alpha rules.");
+
+    finish(h).await;
+}
+
 /// A granted tool may not be moved to another upstream mid-session.
 ///
 /// The finding this closes: a `Grant` names a tool, not an upstream, so

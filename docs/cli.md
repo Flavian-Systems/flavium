@@ -150,7 +150,7 @@ untrusted data and is never identity.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (namespacing is a documented follow-up). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions the client receives. |
+| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (namespacing is a documented follow-up). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions — which an **enforced** session does not forward (below). |
 | `command` | array of strings | one of `command`/`url` | Program followed by its arguments, as separate array elements — no shell is involved, so no quoting, globbing, or `$VAR` expansion. The program is resolved on `PATH` like any spawned process. The child's stdin/stdout carry MCP; its stderr is inherited from the proxy (so its logs appear next to the proxy's). Must be non-empty with a non-empty program. |
 | `url` | string | one of `command`/`url` | A streamable-HTTP MCP endpoint. Must parse and use the `http` or `https` scheme. HTTPS uses rustls with bundled roots; redirects are refused. |
 | `headers` | table of string → string | no (only with `url`) | Extra HTTP headers sent on every request to that upstream — typically `Authorization`. Names and values must be legal HTTP header syntax (a value with a newline is rejected at startup). Values are treated as secrets: never logged, never echoed in errors, never traced. Specifying `headers` on a `command` upstream is an error. |
@@ -386,6 +386,26 @@ Two shapes, and the difference is deliberate.
 
 Neither reaches the upstream. Both are logged (`WARN`) and traced.
 
+### What an enforced handshake withholds
+
+Hiding a tool from `tools/list` is only worth doing if nothing else names
+it, so an **enforced** session does not forward upstream `instructions`
+to the client at all. That field is free text a server writes for the
+agent, and servers routinely list their tools in it — forwarding it would
+disclose precisely the names the filtered list and the byte-identical
+`Unknown tool` denial exist to withhold.
+
+It is dropped whole, never filtered: deciding which parts of it are safe
+would mean reading untrusted text against a grammar nobody wrote, and
+flavium does not parse what it cannot authorize. The cost is real and
+one-sided — an agent loses guidance the server meant for it — which is
+why `--unenforced` still forwards `instructions` exactly as before.
+Per-upstream opt-in is the obvious refinement and is not implemented.
+
+The handshake's trace event records `upstream_instructions_withheld`, a
+count of the upstreams whose text was dropped. A count, not the text: the
+audit question is whether anything was disclosed, not what it said.
+
 ## 5. stdout, stderr, and logging
 
 - **stdout is the MCP wire.** Only newline-delimited JSON-RPC frames
@@ -433,7 +453,7 @@ milliseconds, a session id (`<start-secs>-<pid>`), and an `event`:
 | `event` | When | Notable fields |
 |---|---|---|
 | `session_started` | Once, after every upstream is up | `principal`, `grants` — the policy in force, so every later `allow` index can be read against it |
-| `handshake_completed` | The client's `initialize` was answered | offered and negotiated protocol version, the client's self-reported name/version (untrusted, informational) |
+| `handshake_completed` | The client's `initialize` was answered | offered and negotiated protocol version, the client's self-reported name/version (untrusted, informational), and `upstream_instructions_withheld` — how many upstreams' `instructions` were not forwarded |
 | `tools_listed` | Each `tools/list` | `offered`, `granted`, and the `now` the filter used |
 | `call_refused` | A `tools/call` refused before any decision | `tool` (when it could be read), `reason`: `malformed_params`, `unknown_tool`, `duplicate_request_id` |
 | `call_decided` | Every authorized call | `tool`, `args` **as evaluated**, `args_as_sent` when normalization changed a value, `now`, and `decision` |

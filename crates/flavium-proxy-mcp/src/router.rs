@@ -771,6 +771,25 @@ impl Session {
         record_to(Some(enforcement), event(enforcement.principal()))
     }
 
+    /// How many upstreams' `instructions` this handshake withholds.
+    ///
+    /// Zero when the session is unenforced, where the field is forwarded
+    /// exactly as before — there is no envelope for it to exceed, and no
+    /// trace to record it in either.
+    fn withheld_instruction_count(&self) -> u64 {
+        if self.enforcement.is_none() {
+            return 0;
+        }
+        self.infos
+            .iter()
+            .filter(|info| {
+                info.instructions
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
+            })
+            .count() as u64
+    }
+
     /// Which upstream each granted tool routes to in `set`.
     fn granted_route_snapshot(&self, set: &ToolSet) -> BTreeMap<String, usize> {
         let Some(enforcement) = self.enforcement.as_ref() else {
@@ -1049,6 +1068,7 @@ impl Session {
         // queued: the client's self-reported name and version are
         // untrusted, informational, never identity — kept so protocol
         // drift is observable in the audit record.
+        let withheld = self.withheld_instruction_count();
         let recorded = self.record(|_| TraceEvent::HandshakeCompleted {
             offered_protocol_version: self
                 .handshake
@@ -1058,6 +1078,7 @@ impl Session {
             protocol_version: negotiated.clone(),
             client_name: self.handshake.client_name.clone(),
             client_version: self.handshake.client_version.clone(),
+            upstream_instructions_withheld: withheld,
         });
         if recorded.is_err() {
             return Err(SessionEnd::TraceFailed);
@@ -1076,8 +1097,19 @@ impl Session {
                 "version": env!("CARGO_PKG_VERSION"),
             },
         });
-        if let Some(instructions) = merged_instructions(&self.infos) {
-            result["instructions"] = serde_json::Value::String(instructions);
+        // Withheld under enforcement (**W2**, visibility ⊆ authority).
+        // `instructions` is free text an upstream writes for the agent,
+        // and servers routinely enumerate their tools in it — so
+        // forwarding it discloses exactly the names the filtered
+        // `tools/list` and the byte-identical unknown-tool denial exist
+        // to withhold. It is dropped whole rather than scanned: reading
+        // the text to decide which parts are safe would mean parsing
+        // untrusted bytes against a grammar nobody wrote, which is the
+        // shape this codebase refuses everywhere else.
+        if self.enforcement.is_none() {
+            if let Some(instructions) = merged_instructions(&self.infos) {
+                result["instructions"] = serde_json::Value::String(instructions);
+            }
         }
         self.phase = Phase::Initializing;
         Ok(builder::result_frame(id_raw, &result.to_string()))

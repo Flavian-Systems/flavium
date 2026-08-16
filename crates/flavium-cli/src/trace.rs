@@ -219,6 +219,7 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             protocol_version,
             client_name,
             client_version,
+            upstream_instructions_withheld,
         } => {
             out.push_str(r#""event":"handshake_completed","offered_protocol_version":"#);
             write_capped(out, offered_protocol_version);
@@ -228,6 +229,8 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             write_optional(out, client_name.as_deref());
             out.push_str(r#","client_version":"#);
             write_optional(out, client_version.as_deref());
+            out.push_str(r#","upstream_instructions_withheld":"#);
+            out.push_str(&upstream_instructions_withheld.to_string());
         }
         TraceEvent::ToolsListed {
             principal,
@@ -1011,9 +1014,11 @@ mod tests {
             protocol_version: "2025-11-25".into(),
             client_name: Some("claude".into()),
             client_version: None,
+            upstream_instructions_withheld: 2,
         });
         assert_eq!(handshake["client_name"], "claude");
         assert!(handshake["client_version"].is_null());
+        assert_eq!(handshake["upstream_instructions_withheld"], 2);
 
         let upstream = line_of(&TraceEvent::UpstreamEnded {
             upstream: "fs".into(),

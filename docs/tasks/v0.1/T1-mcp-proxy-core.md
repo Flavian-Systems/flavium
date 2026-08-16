@@ -284,7 +284,8 @@ were false allows**, and four of those were in `normalize.rs` and its
 loader guard — the module written to close exactly this class, whose own
 M5 note above says the lesson was *"test the invariant at the degenerate
 inputs"*. It had been applied to half the degenerate space. Those five
-are fixed here; the rest are listed at the end of this section.
+are fixed here, together with the one information leak (6); the rest are
+listed at the end of this section.
 
 1. **The bare root was accepted, and it crosses roots.** The M5 note
    above says `"/"` is fine because "an operator who writes the root has
@@ -331,10 +332,23 @@ are fixed here; the rest are listed at the end of this section.
    `ArgValue::Other`, which no constraint admits, and the spelling still
    reaches the trace via `args_as_sent`.
 
-Nine further defects were confirmed and are **not** fixed here, to keep
-this change to the authority axis: `initialize` forwards each upstream's
-`instructions` unfiltered (an info leak naming tools the filtered
-`tools/list` hides); the `classify` arm commented "Unreachable" is
+6. **`initialize` forwarded each upstream's `instructions` unfiltered.**
+   Visibility ⊆ authority (W2) was enforced only in `on_tools_list`;
+   `on_initialize` copied the upstreams' free text into the proxy's own
+   result without consulting `enforcement`, and MCP servers routinely
+   enumerate their tools in that field. The handshake therefore disclosed
+   exactly the names the filtered list and the byte-identical
+   `Unknown tool` denial exist to withhold. An enforced session now drops
+   it whole — filtering it would mean reading untrusted text against a
+   grammar nobody wrote — and `HandshakeCompleted` carries a count of
+   what was withheld, never the text. `--unenforced` is unchanged.
+   *The generalisation: an invariant enforced at one exit is not
+   enforced; every path that reaches the client is an exit.* Every
+   enforced fixture booted with `instructions: None`, which is why 289
+   tests never saw it.
+
+Eight further defects were confirmed and are **not** fixed here, to keep
+this change to the authority and visibility axes: the `classify` arm commented "Unreachable" is
 reachable via a lone-surrogate escape; a 202 to a request POST is treated
 as success so the call never completes; a pre-epoch clock un-expires
 grants while the rustdoc claims the opposite direction; a stale
