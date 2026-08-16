@@ -10,9 +10,9 @@ must deliver. Where this document and the code disagree, the code is
 right and this document has a bug. Vocabulary is fixed in
 [GLOSSARY.md](../GLOSSARY.md).
 
-M3 added the types, traits and trace vocabulary in `flavium-core`; M4
-and M5 will add the engine and the enforcement hook (§10). The flows
-below gain a step; their shape does not change.
+M3 added the types, traits and trace vocabulary in `flavium-core` and
+M4 the Cedar engine in `flavium-policy`; M5 adds the enforcement hook
+(§10). The flows below gain a step; their shape does not change.
 
 ## Contents
 
@@ -691,7 +691,8 @@ Only `ProxyConfig` is runtime-configurable today; the CLI passes
 ## 10. Where enforcement plugs in
 
 What the T1 plan says lands next, and the seams in this crate that were
-left for it. This section is a forecast — update it as M4–M5 merge.
+left for it. The engine half has landed (M4); everything below that is
+marked M5 is still a forecast — update it as M5 merges.
 
 - **The vocabulary exists (M3, `flavium-core`).** `GrantEnvelope`
   (principal + grants), `Grant`/`Constraint`/`ArgValue`, `ToolCall`,
@@ -699,8 +700,9 @@ left for it. This section is a forecast — update it as M4–M5 merge.
   two traits with no I/O: `Authorizer` (`authorize(principal, call,
   now) -> Decision`, `granted_tools(principal, now)`) and `TraceSink`
   (`record(&TraceEvent) -> Result`). The proxy will depend on
-  `flavium-core` only; the Cedar engine (M4, `flavium-policy`)
-  implements `Authorizer` and the CLI wires it. The full `TraceEvent`
+  `flavium-core` only; the Cedar engine now exists (M4,
+  `flavium-policy::CedarAuthorizer`) and implements `Authorizer`, and
+  the CLI wires it in M5 — nothing calls it yet. The full `TraceEvent`
   catalog — session start/end, handshake, `ToolsListed`, `CallRefused`
   / `CallDecided` / `CallCompleted` keyed by a per-session `CallId`,
   `FrameRejected`, `FrameDiscarded`, `UpstreamEnded` — is defined
