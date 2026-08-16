@@ -27,11 +27,37 @@
 //! or more, which is a different root (see [`normalize`]) — `.` segments
 //! dropped, `..` resolved against the previous segment, never escaping the
 //! root of an absolute path, a leading `..` of a relative path kept,
-//! trailing separator dropped from a value and kept on a prefix. **No case
-//! folding, no filesystem access, no symlink resolution** — symlinks and
-//! hardlinks are outside what a proxy can see (DESIGN §7), so a
-//! case-insensitive filesystem can refuse a call the upstream would have
-//! served (`/DATA/x` under `/data/`): a false denial, never a false allow.
+//! trailing separator dropped from a value and kept on a prefix, and —
+//! **under [`PathFlavor::Windows`] only** — ASCII case folded.
+//!
+//! Case folding follows the same reasoning as the separator: it is part of
+//! the resolution rule the operator declared, not a guess about the host.
+//! Windows resolves `c:\users\me\x` and `C:\Users\Me\X` to one file, so a
+//! grant that admits one and refuses the other decides on the spelling
+//! rather than the resource — the very thing this module exists to stop.
+//! **Folding is ASCII only** (`A`–`Z` ↔ `a`–`z`), the set Windows is
+//! guaranteed to fold: full Unicode lowercasing can merge characters
+//! Windows keeps apart, and can even change a string's length (`İ`), and
+//! either would be a false *allow*. A non-ASCII case difference therefore
+//! still refuses a call the upstream would have served — a false denial,
+//! which is the side this module always errs to. `PathFlavor::Posix` folds
+//! nothing.
+//!
+//! Folding does not promise that the upstream will *serve* a path, only
+//! that flavium is not the one refusing it on spelling: an upstream may
+//! run its own case-sensitive check (`@modelcontextprotocol/server-filesystem`
+//! compares its allowed-directories root that way), and a path this
+//! module admits can still come back as that upstream's own error.
+//!
+//! Still **no filesystem access and no symlink resolution** — symlinks and
+//! hardlinks are outside what a proxy can see (DESIGN §7). Two residual
+//! gaps, both named rather than hidden: a POSIX upstream wrongly declared
+//! `windows-path-prefix` now folds case as well as separators (declaring
+//! the flavor asserts the whole resolution rule, and that upstream needed
+//! `path-prefix`), and an NTFS directory switched to case-sensitive
+//! (`fsutil file setCaseSensitiveInfo`) holds files this normalizer treats
+//! as one — rare, opt-in per directory, and a false allow only between two
+//! files whose names differ solely by case.
 //!
 //! # Example
 //!
@@ -48,6 +74,9 @@
 //! assert_eq!(normalize(r"\data\x", PathFlavor::Windows), "/data/x");
 //! // …but a UNC root stays distinct from the current drive's root.
 //! assert_eq!(normalize(r"\\host\share\x", PathFlavor::Windows), "//host/share/x");
+//! // The Windows flavor folds ASCII case, so one file has one spelling.
+//! assert_eq!(normalize(r"C:\Users\Me\X", PathFlavor::Windows), "c:/users/me/x");
+//! assert_eq!(normalize("/DATA/x", PathFlavor::Posix), "/DATA/x");
 //!
 //! // A prefix keeps the trailing separator its author wrote: dropping it
 //! // would widen `/data/invoices/` to also admit `/data/invoices.bak`.
@@ -95,13 +124,18 @@ impl PathFlavor {
 /// | `/data/invoices/../../etc/passwd` | `/etc/passwd` | `/etc/passwd` |
 /// | `/data//./invoices/` | `/data/invoices` | `/data/invoices` |
 /// | `\data\x` | `\data\x` | `/data/x` |
-/// | `C:\Users\me\..\other` | `C:\Users\me\..\other` | `C:/Users/other` |
+/// | `C:\Users\me\..\other` | `C:\Users\me\..\other` | `c:/users/other` |
 /// | `/..` | `/` | `/` |
 /// | `../a` | `../a` | `../a` |
 /// | `` (empty) | `` | `` |
 /// | `\\server\share\x` | `\\server\share\x` | `//server/share/x` |
+/// | `/DATA/x` | `/DATA/x` | `/data/x` |
 ///
-/// A Windows drive letter is just the first segment (`C:/Users/…`), but a
+/// The `Windows` column is ASCII lowercase throughout: that flavor folds
+/// case (see the module docs), because Windows resolves paths that differ
+/// only in case to the same file. `Posix` leaves case alone.
+///
+/// A Windows drive letter is just the first segment (`c:/users/…`), but a
 /// **leading run of two or more separators is preserved as exactly two**
 /// and is never collapsed into one. That distinction is load-bearing: on
 /// Windows `\\data\share\x` is a UNC path to a share on a *host* called
@@ -144,13 +178,22 @@ pub fn normalize(value: &str, flavor: PathFlavor) -> String {
     let mut out = String::with_capacity(root.len() + joined.len());
     out.push_str(root);
     out.push_str(&joined);
+    // ASCII only, and only for the flavor whose resolution rule says so:
+    // `make_ascii_lowercase` cannot change the string's length or merge
+    // characters Windows keeps apart, so it cannot widen a prefix by
+    // accident. Non-ASCII is left exactly as it arrived.
+    if flavor == PathFlavor::Windows {
+        out.make_ascii_lowercase();
+    }
     out
 }
 
 /// Normalizes one path *prefix* — what a grant wrote.
 ///
-/// The same normalization as [`normalize`], except that a trailing
-/// separator survives. That difference is load-bearing: `/data/invoices/`
+/// The same normalization as [`normalize`] — including the Windows
+/// flavor's ASCII case folding, so both sides of the comparison are folded
+/// or neither is — except that a trailing separator survives. That
+/// difference is load-bearing: `/data/invoices/`
 /// normalized to `/data/invoices` would, as a byte prefix, also admit
 /// `/data/invoices.bak/secret` — **normalization must never widen what an
 /// operator wrote**, in either direction.
@@ -213,12 +256,13 @@ mod tests {
             (
                 r"C:\Users\me\Desktop\..\..\Administrator\secrets",
                 r"C:\Users\me\Desktop\..\..\Administrator\secrets",
-                "C:/Users/Administrator/secrets",
+                "c:/users/administrator/secrets",
             ),
             (r"\\server\share\x", r"\\server\share\x", "//server/share/x"),
             (r"\server\share\x", r"\server\share\x", "/server/share/x"),
-            // No case folding, ever.
-            ("/DATA/x", "/DATA/x", "/DATA/x"),
+            // ASCII case folded under the Windows flavor, never under POSIX.
+            ("/DATA/x", "/DATA/x", "/data/x"),
+            (r"C:\Users\Me\X", r"C:\Users\Me\X", "c:/users/me/x"),
             // Not a path traversal: `...` and `..a` are ordinary names.
             ("/a/.../b", "/a/.../b", "/a/.../b"),
             ("/a/..b/c", "/a/..b/c", "/a/..b/c"),
@@ -275,6 +319,62 @@ mod tests {
         );
     }
 
+    /// The Windows flavor folds ASCII case on both sides of the
+    /// comparison — and folds nothing else.
+    ///
+    /// The allow rows are the live finding this behavior comes from: the
+    /// T1/M5 run against `server-filesystem` denied
+    /// `c:\users\flavi\desktop\flavium-demo\ok.txt` while allowing the
+    /// same file spelled `C:\Users\…`, which is a decision about the
+    /// spelling rather than the resource. The deny rows are what folding
+    /// must *not* buy: a different directory stays outside, `..` still
+    /// resolves before the comparison, and a non-ASCII case difference is
+    /// still refused (the documented false denial).
+    #[test]
+    fn the_windows_flavor_folds_ascii_case_only() {
+        let grant = normalize_prefix(r"C:\Users\flavi\Desktop\flavium-demo\", PathFlavor::Windows);
+        assert_eq!(grant, "c:/users/flavi/desktop/flavium-demo/");
+        for allowed in [
+            r"C:\Users\flavi\Desktop\flavium-demo\ok.txt",
+            r"c:\users\flavi\desktop\flavium-demo\ok.txt",
+            r"C:\USERS\FLAVI\DESKTOP\FLAVIUM-DEMO\OK.TXT",
+            "c:/Users/flavi/Desktop/flavium-demo/ok.txt",
+            r"c:\users\flavi\desktop\other\..\flavium-demo\ok.txt",
+        ] {
+            assert!(
+                normalize(allowed, PathFlavor::Windows).starts_with(&grant),
+                "case-equal path was refused: {allowed:?}"
+            );
+        }
+        for denied in [
+            r"C:\Users\flavi\Desktop\outside.txt",
+            r"c:\users\flavi\desktop\flavium-demo\..\outside.txt",
+            r"C:\Users\flavi\Desktop\flavium-demo2\x",
+            r"D:\Users\flavi\Desktop\flavium-demo\ok.txt",
+            r"\\host\users\flavi\desktop\flavium-demo\ok.txt",
+        ] {
+            assert!(
+                !normalize(denied, PathFlavor::Windows).starts_with(&grant),
+                "folding case admitted {denied:?}"
+            );
+        }
+
+        // Non-ASCII is left alone: `Ä` and `ä` stay distinct, so this is
+        // refused even though Windows would serve it. A false denial —
+        // the side this module errs to — and the reason folding is ASCII
+        // only is that the Unicode answer can merge or resize.
+        let accented = normalize_prefix("C:\\data\\\u{c4}\\", PathFlavor::Windows);
+        assert_eq!(accented, "c:/data/\u{c4}/");
+        assert!(!normalize("C:\\data\\\u{e4}\\x", PathFlavor::Windows).starts_with(&accented));
+        assert!(normalize("C:\\DATA\\\u{c4}\\x", PathFlavor::Windows).starts_with(&accented));
+
+        // POSIX folds nothing: the flavor difference is the whole point.
+        let posix = normalize_prefix("/data/Invoices/", PathFlavor::Posix);
+        assert_eq!(posix, "/data/Invoices/");
+        assert!(!normalize("/data/invoices/x", PathFlavor::Posix).starts_with(&posix));
+        assert!(normalize("/data/Invoices/x", PathFlavor::Posix).starts_with(&posix));
+    }
+
     /// A prefix must never come out wider than it went in.
     #[test]
     fn prefix_keeps_its_trailing_separator() {
@@ -289,8 +389,8 @@ mod tests {
             ("/..", PathFlavor::Posix, "/"),
             (r"\data\", PathFlavor::Windows, "/data/"),
             (r"\\host\share\", PathFlavor::Windows, "//host/share/"),
-            ("C:/Users/me/", PathFlavor::Windows, "C:/Users/me/"),
-            (r"C:\Users\me\", PathFlavor::Windows, "C:/Users/me/"),
+            ("C:/Users/me/", PathFlavor::Windows, "c:/users/me/"),
+            (r"C:\Users\me\", PathFlavor::Windows, "c:/users/me/"),
             (r"\data\", PathFlavor::Posix, r"\data\"),
         ] {
             assert_eq!(

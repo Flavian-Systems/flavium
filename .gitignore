@@ -28,3 +28,5 @@ Cargo.lock
 /dist
 # Local proxy config used for manual demos (contains machine paths / may hold secrets)
 /flavium.toml
+# The trace those demo runs write (contains machine paths and call arguments)
+/flavium-trace.jsonl

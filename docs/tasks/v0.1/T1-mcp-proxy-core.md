@@ -162,6 +162,25 @@ Recorded here so the next reader is not misled by either document.
   enforcement is configured, the only path to `Command::Forward` runs
   through a `Decision::Allow`", which is still one branch in one
   function.
+- **D4's "no case folding" was wrong for the Windows flavor**, and the
+  first live run against a real filesystem server is what showed it: the
+  same file was allowed as `C:\Users\…\ok.txt` and denied as
+  `c:\users\…\ok.txt`. The rule was written from the POSIX argument (a
+  proxy cannot see the filesystem, so it must not guess how a name
+  resolves), but the flavor is not a guess — an operator who writes
+  `windows-path-prefix` has *declared* the resolution rule, and
+  case-insensitivity is as much a part of it as `\`. Deciding on the
+  spelling rather than the resource is the exact failure the normalizer
+  exists to prevent; that D4 landed on the safe side of it made it a
+  lost call rather than a leaked one, not a correct rule. The Windows
+  flavor now folds **ASCII** case on both sides. ASCII and not Unicode
+  because full folding can merge characters Windows keeps apart and can
+  change a string's length (`İ`), and either would turn the fix into a
+  false *allow*; a non-ASCII case difference is still refused, which
+  keeps D4's asymmetry where it belongs. Two residual gaps are now
+  documented rather than implied: a POSIX upstream wrongly declared
+  `windows-path-prefix` folds case too, and a case-sensitive NTFS
+  directory can hold two files this normalizer reads as one.
 - **A path *prefix* keeps its trailing separator; a path *value* does
   not.** D4's normalizer rules end with "trailing separator dropped",
   and applying that to the prefix an operator wrote would *widen* the

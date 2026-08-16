@@ -60,9 +60,11 @@ fn gate_envelope() -> flavium_core::GrantEnvelope {
             &[("path", Constraint::Prefix("/data/invoices/".into()))],
             None,
         ),
+        // Folded, as `normalize_prefix` would leave it: the Windows
+        // flavor case-folds both sides of the comparison.
         constrained(
             "read_win",
-            &[("path", Constraint::Prefix("C:/Users/me/Desktop/".into()))],
+            &[("path", Constraint::Prefix("c:/users/me/desktop/".into()))],
             None,
         ),
         constrained(
@@ -236,7 +238,7 @@ async fn the_denial_table() {
             "d5",
             "read_win",
             r#"{"path": "C:\\Users\\me\\Desktop\\..\\..\\Administrator\\secrets"}"#,
-            "C:/Users/Administrator/secrets",
+            "c:/users/administrator/secrets",
         ),
         // A constrained argument that is missing is not admitted.
         ("d6", "read_file", r#"{}"#, ""),
@@ -399,6 +401,18 @@ async fn normalized_paths_inside_the_prefix_are_allowed() {
             "read_win",
             r#"{"path": "C:/Users/me/Desktop/notes.txt"}"#,
         ),
+        // Case-varied spellings of the same Windows file: one resource,
+        // one decision.
+        (
+            "p6",
+            "read_win",
+            r#"{"path": "c:\\users\\me\\desktop\\notes.txt"}"#,
+        ),
+        (
+            "p7",
+            "read_win",
+            r#"{"path": "C:\\USERS\\ME\\DESKTOP\\NOTES.TXT"}"#,
+        ),
     ] {
         h.client
             .send(&format!(
@@ -424,7 +438,7 @@ async fn normalized_paths_inside_the_prefix_are_allowed() {
         decisions(&events)
     );
     let summary = finish(h).await;
-    assert_eq!(summary.frames_to_upstream, 5);
+    assert_eq!(summary.frames_to_upstream, 7);
 }
 
 /// **W5** — the decision is made on the normalized value while the

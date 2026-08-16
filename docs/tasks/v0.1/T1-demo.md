@@ -279,6 +279,73 @@ path that flavium normalizes one way resolves another way inside the
 upstream, that is a false allow or a false denial and it shows up here
 first — the flavor map is one module (`normalize.rs`) if it must change.
 
+### M5 run, part one — scripted client, 2026-08-16
+
+The enforcement rows above are written for Claude Desktop and the GUI
+half is still owed; the *semantics* were run first against the same real
+upstream (`secure-filesystem-server` 0.2.0 via `npx.cmd`, 14 tools
+offered) by piping JSON-RPC frames straight into
+`flavium proxy --config … --trace …`, which is what the checklist's
+*Checking the wire directly* section does, extended to a whole session.
+That run is what forced the case-folding change below, so it is recorded
+here rather than folded into the Claude Desktop run.
+
+Grant file: exactly the two grants above. What the ten frames showed:
+
+- startup `enforcing grants principal=desktop-bot grants=2`, then
+  `all upstreams initialized … upstreams=1 tools=14 enforced=true`;
+- `tools_listed offered=14 granted=2` — the client is shown two tools;
+- `flavium-demo\ok.txt` allowed; `outside.txt` denied
+  (`denied by policy`, `isError: true`);
+- `flavium-demo\..\outside.txt` denied, and the trace records the
+  **normalized** `C:/Users/flavi/Desktop/outside.txt` — the row a byte
+  prefix comparison alone would fail;
+- `Desktop\..\Desktop\flavium-demo\ok.txt` allowed, which is the same
+  normalization pointing the other way;
+- forward slashes in a Windows-flavored path allowed;
+- `write_file` answered `-32602 Unknown tool: write_file`;
+- trace: 16 lines, `seq` dense from 1, `session_started` carrying the
+  envelope → a `call_decided` per call → a `call_completed` per allowed
+  call → `session_ended`; no orphan processes.
+
+**The one disagreement, and what it changed.**
+`c:\users\flavi\desktop\flavium-demo\ok.txt` was **denied** while the
+same file spelled `C:\Users\…` was allowed — flavium deciding on the
+spelling, not the resource. A false denial, so nothing leaked, but it is
+the gap this checklist row exists to find. The Windows flavor now folds
+ASCII case on both sides; see the D4 entry in
+[T1-mcp-proxy-core.md](T1-mcp-proxy-core.md)'s M5 note. No other
+disagreement surfaced.
+
+Before changing the normalizer the upstream's *own* case behavior was
+measured, unenforced (`--unenforced -- npx.cmd …`, allowed directory
+`C:\Users\flavi\Desktop`), because "Windows is case-insensitive" is not
+a fact about an upstream, it is a hypothesis about one:
+
+| Path asked for | `server-filesystem` 0.2.0 |
+|---|---|
+| `C:\Users\flavi\Desktop\flavium-demo\ok.txt` | served |
+| `C:\Users\flavi\Desktop\FLAVIUM-DEMO\ok.txt` | **served** |
+| `C:\Users\flavi\Desktop\flavium-demo\OK.TXT` | **served** |
+| `c:\Users\flavi\Desktop\flavium-demo\ok.txt` | **served** |
+| `c:\users\flavi\desktop\flavium-demo\ok.txt` | refused: *path outside allowed directories* |
+
+Rows 2–4 are the false denials the old rule produced: the upstream
+serves those paths, flavium refused them. They are what the folding
+buys. Row 5 is the upstream's own allowed-directories check, which
+compares its root case-**sensitively** (Node's `path.resolve` upper-cases
+the drive letter, which is why row 4 passes and row 5 does not), so under
+the new rule flavium allows that spelling and the upstream refuses it —
+the call still fails, the denial simply comes from the upstream instead
+of from policy. Worth stating plainly: folding does not promise the
+upstream will serve a path, only that **flavium is not the one refusing
+it on spelling**. And rows 2–3 are the evidence that matters for the
+other direction — an upstream that resolves case-insensitively below its
+root means a folded match is the same resource, not a different one.
+
+Still owed: the Claude Desktop rows themselves — the filtered list as the
+UI renders it, and a denial as the model sees it.
+
 **Known gap, Windows.** The trace file is created `0600` on unix only;
 on Windows it inherits the parent directory's ACL. Put it somewhere
 already protected until the packaging work in T5.
@@ -332,11 +399,9 @@ then refused service with
 `proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
 Claude Desktop reporting the server disconnected.
 
-M5 run: **not yet performed.** The M5 code landed with the scripted and
-end-to-end suites green (including the real Cedar engine and a real
-trace file in `proxy_e2e.rs`), but the enforcement variant above is a
-manual run against Claude Desktop on Windows and is still owed. It is
-the first contact between `windows-path-prefix` and a real filesystem
-server; record the result — and any flavor correction it forces — here.
+M5 run: **half performed.** The scripted half is recorded above
+(2026-08-16, `secure-filesystem-server` 0.2.0, client-face
+`2025-11-25`) and it forced one flavor correction — ASCII case folding
+under `windows-path-prefix`. The Claude Desktop half is still owed.
 
 Current pin: **2025-11-25**.

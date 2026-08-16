@@ -287,11 +287,24 @@ another machine, and a stdio child can be in WSL or a container. A grant
 names one tool, and a tool belongs to one upstream, so the grant is
 exactly the scope at which you know the answer.
 
-What normalization does **not** do: no case folding (so on a
-case-insensitive filesystem `/DATA/x` under `/data/` is refused — a lost
-call, never a leaked one), no filesystem access, and **no symlink
-resolution**. Symlinks and hardlinks are outside what a proxy can see;
-that boundary is DESIGN §7's and v0.2's job.
+`windows-path-prefix` also folds **ASCII** case, on the prefix and on the
+value alike: Windows resolves `C:\Users\Me\x` and `c:\users\me\x` to one
+file, so a grant that admits one spelling and refuses the other is
+deciding about the spelling rather than the resource. Declaring the
+flavor declares the whole resolution rule, not just the separator. The
+trace records the folded form, because it records what the decision was
+made on. `path-prefix` folds nothing — POSIX filesystems are
+case-sensitive.
+
+What normalization does **not** do: fold anything outside ASCII (so
+`C:\data\Ä\x` under `C:\data\ä\` is refused — a lost call, never a
+leaked one; full Unicode folding can merge characters Windows keeps
+apart, which would be the opposite kind of mistake), no filesystem
+access, and **no symlink resolution**. Symlinks and hardlinks are outside
+what a proxy can see; that boundary is DESIGN §7's and v0.2's job. One
+more edge worth knowing: an NTFS directory switched to case-sensitive
+(`fsutil file setCaseSensitiveInfo`) can hold two files whose names
+differ only in case, and this normalizer treats them as one.
 
 ### What is refused, and what is only warned about
 

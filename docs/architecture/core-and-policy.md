@@ -285,8 +285,12 @@ wrong:
 - **Comparison is byte-wise, with no normalization anywhere in this
   crate.** `Prefix("/data/inv")` admits `/data/invalid`: it is a byte
   prefix, not a path-component prefix. `Suffix("yourco.com")` admits
-  `x@evilyourco.com`: write the `@`. Case matters. Path normalization —
-  separators, `.`, `..` — happens in the proxy *before* the value reaches
+  `x@evilyourco.com`: write the `@`. Case matters *here* — the one place
+  it does not is a `windows-path-prefix` argument, and even then the
+  folding happens in the proxy, not in this crate, so both the prefix and
+  the value have already been folded by the time they meet. Path
+  normalization — separators, `.`, `..`, and that ASCII case folding —
+  happens in the proxy *before* the value reaches
   core, and only for arguments a grant declared path-flavored; see
   [proxy-mcp §10](proxy-mcp.md#10-where-enforcement-plugs-in) and
   [cli.md §4](../cli.md#4-grants).
