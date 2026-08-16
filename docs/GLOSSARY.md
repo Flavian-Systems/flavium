@@ -158,6 +158,22 @@ is the source of truth for architecture; this file only fixes the words.
   unmodelled shape is not admitted; arguments no constraint names are
   not examined (an authoring pitfall: constrain every argument that
   matters).
+- **Path normalization** — rewriting a path-valued argument into its
+  canonical form (separators unified and collapsed, `.` dropped, `..`
+  resolved, never escaping the root) *before* its constraint is checked,
+  so the check is about the resource rather than the spelling. Opt-in per
+  argument in the grant file (M5): only the path-flavored constraints
+  normalize, because normalizing a value that is not a path silently
+  changes what the decision was about. Without it, `Prefix("/data/")`
+  admits `/data/../etc/passwd` — a byte prefix match whose resource is
+  `/etc/passwd`. The decision uses the normalized value; the forwarded
+  frame keeps the client's original bytes.
+- **Path flavor** — which characters a path-flavored constraint treats as
+  separators: POSIX (`/` only) or Windows (`/` and `\`). Declared per
+  grant rather than guessed, because `\` is an ordinary filename byte on
+  POSIX and *the* separator on Windows, so either fixed answer is a false
+  allow on the other platform. A grant names one tool and a tool belongs
+  to one upstream, so the grant is the scope at which the answer is known.
 - **Grant envelope** — the union of an agent's grants: the precomputable
   worst case of what it can do (`flavium_core::GrantEnvelope`:
   principal + grants, in file order).
@@ -201,10 +217,32 @@ is the source of truth for architecture; this file only fixes the words.
   refusal. Notably: a tool outside the table answers `-32602` exactly
   like a tool outside the grant envelope will (M5) — denial is
   indistinguishable from nonexistence.
+- **False allow** — flavium answered `Allow`, but the effect landed
+  outside the grant. The security failure: it breaks the claim that an
+  agent's worst case is the union of its grants. It arises wherever the
+  runtime's model of a call diverges from what the upstream actually does
+  with it — the argument's *spelling* versus the *resource* it resolves to
+  — which is why it is the failure mode prompt injection reaches for: no
+  new credential is needed, only a spelling the checker and the upstream
+  read differently.
+- **False denial** — flavium answered `Deny`, but the effect would have
+  been inside the grant. Nothing escapes; a legitimate task just fails.
+  The two errors are deliberately not treated as equals. A false denial
+  announces itself — someone complains, and the fix is one line of grant
+  file — while a false allow is silent by construction and is discovered,
+  if ever, as an incident. That difference in *detectability* matters as
+  much as the difference in cost, and is why "we have seen no problem" is
+  not evidence of correctness.
 - **Fail closed** — when input cannot be handled exactly, refuse it;
   never repair, guess, or forward it. Unparseable frames are rejected
   or dropped, evaluation errors deny, invalid encodings are refused
-  rather than patched.
+  rather than patched. Stated in terms of the two errors above: fail
+  closed is the standing choice of a *false denial* over a *false allow*
+  wherever the honest answer is "I cannot tell". It is why a constrained
+  argument that is missing, wrong-typed or unmodelled is not admitted, why
+  an empty `OneOf` and a `min > max` range admit nothing, and why
+  `attenuates` is sound but not complete — it may refuse a child grant set
+  that genuinely is a subset, but never accepts one that is not.
 
 ## Policy engine (Cedar)
 
