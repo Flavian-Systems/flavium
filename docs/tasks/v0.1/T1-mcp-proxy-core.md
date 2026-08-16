@@ -342,6 +342,11 @@ listed at the end of this section.
    it whole — filtering it would mean reading untrusted text against a
    grammar nobody wrote — and `HandshakeCompleted` carries a count of
    what was withheld, never the text. `--unenforced` is unchanged.
+   The withholding also logs a `WARN` naming the upstreams: the reason a
+   lost capability is an acceptable price for a closed leak is that it
+   announces itself, which is only true if something announces it, and
+   the trace count alone does not reach an operator running without
+   `--trace`.
    *The generalisation: an invariant enforced at one exit is not
    enforced; every path that reaches the client is an exit.* Every
    enforced fixture booted with `instructions: None`, which is why 289

@@ -402,9 +402,22 @@ one-sided — an agent loses guidance the server meant for it — which is
 why `--unenforced` still forwards `instructions` exactly as before.
 Per-upstream opt-in is the obvious refinement and is not implemented.
 
-The handshake's trace event records `upstream_instructions_withheld`, a
-count of the upstreams whose text was dropped. A count, not the text: the
-audit question is whether anything was disclosed, not what it said.
+Because that cost is real, it is said out loud rather than only recorded:
+the handshake logs a `WARN` naming the upstreams whose instructions were
+dropped. A lost capability is only an acceptable price for a closed leak
+if somebody is told it was lost — otherwise the agent just quietly uses a
+server worse and nothing explains why.
+
+```text
+WARN flavium_proxy_mcp::router: withholding upstream instructions from the
+client: an enforced session does not forward them, because servers name
+their tools there. The agent loses that guidance; `--unenforced` forwards
+it. upstreams=fs
+```
+
+The handshake's trace event also records `upstream_instructions_withheld`,
+a count of the upstreams whose text was dropped. A count, not the text:
+the audit question is whether anything was disclosed, not what it said.
 
 ## 5. stdout, stderr, and logging
 

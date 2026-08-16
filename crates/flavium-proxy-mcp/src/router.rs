@@ -771,14 +771,15 @@ impl Session {
         record_to(Some(enforcement), event(enforcement.principal()))
     }
 
-    /// How many upstreams' `instructions` this handshake withholds.
+    /// The upstreams whose `instructions` this handshake withholds, by
+    /// name, so the warning can say which servers went quiet.
     ///
-    /// Zero when the session is unenforced, where the field is forwarded
+    /// Empty when the session is unenforced, where the field is forwarded
     /// exactly as before — there is no envelope for it to exceed, and no
     /// trace to record it in either.
-    fn withheld_instruction_count(&self) -> u64 {
+    fn withheld_instruction_upstreams(&self) -> Vec<&str> {
         if self.enforcement.is_none() {
-            return 0;
+            return Vec::new();
         }
         self.infos
             .iter()
@@ -787,7 +788,8 @@ impl Session {
                     .as_deref()
                     .is_some_and(|text| !text.is_empty())
             })
-            .count() as u64
+            .map(|info| info.name.as_str())
+            .collect()
     }
 
     /// Which upstream each granted tool routes to in `set`.
@@ -1064,11 +1066,29 @@ impl Session {
             client_version = self.handshake.client_version.as_deref(),
             "answered client initialize"
         );
+        // Said out loud, not only recorded. Withholding `instructions`
+        // costs the agent guidance its server meant for it, and the
+        // reason that cost is acceptable is that a lost capability
+        // announces itself while a leaked one does not — which is only
+        // true if something announces it. The trace carries the count,
+        // but an operator running without `--trace` would otherwise see
+        // an agent quietly using a server worse, with nothing to explain
+        // why.
+        let withheld = self.withheld_instruction_upstreams();
+        if !withheld.is_empty() {
+            let upstreams = withheld.join(", ");
+            warn!(
+                %upstreams,
+                "withholding upstream instructions from the client: an enforced session does \
+                 not forward them, because servers name their tools there. The agent loses \
+                 that guidance; `--unenforced` forwards it."
+            );
+        }
+        let withheld = withheld.len() as u64;
         // Recorded where the negotiation finished, before the answer is
         // queued: the client's self-reported name and version are
         // untrusted, informational, never identity — kept so protocol
         // drift is observable in the audit record.
-        let withheld = self.withheld_instruction_count();
         let recorded = self.record(|_| TraceEvent::HandshakeCompleted {
             offered_protocol_version: self
                 .handshake
