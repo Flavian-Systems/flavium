@@ -65,6 +65,11 @@ struct ProxyUnderTest {
     child: Child,
     stdin: Option<std::process::ChildStdin>,
     lines: mpsc::Receiver<std::io::Result<String>>,
+    /// The proxy's captured stderr — its log stream — collected on a
+    /// helper thread and readable once the process has exited. `None`
+    /// when stderr was inherited, which is every test that does not
+    /// assert on a log line.
+    log: Option<std::thread::JoinHandle<String>>,
 }
 
 impl ProxyUnderTest {
@@ -92,16 +97,40 @@ impl ProxyUnderTest {
     }
 
     fn spawn_with_args(args: &[OsString]) -> Self {
+        Self::spawn_inner(args, false)
+    }
+
+    /// Same, but with stderr captured so a test can assert on the log.
+    fn spawn_capturing_log(args: &[OsString]) -> Self {
+        Self::spawn_inner(args, true)
+    }
+
+    fn spawn_inner(args: &[OsString], capture_log: bool) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_flavium"))
             .arg("proxy")
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if capture_log {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()
             .expect("failed to spawn flavium");
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("proxy stdout not piped");
+        // Drained on its own thread: the proxy logs more than a pipe
+        // buffer holds over a long session, and a full stderr pipe would
+        // block the process under test rather than fail the assertion.
+        let log = child.stderr.take().map(|stderr| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let mut reader = BufReader::new(stderr);
+                let _ = std::io::Read::read_to_string(&mut reader, &mut text);
+                text
+            })
+        });
 
         // Reads happen on a helper thread so every expectation below can
         // time out instead of hanging CI.
@@ -118,7 +147,19 @@ impl ProxyUnderTest {
             child,
             stdin: Some(stdin.expect("proxy stdin not piped")),
             lines,
+            log,
         }
+    }
+
+    /// Everything the proxy logged. Call after [`Self::wait_for_exit`]:
+    /// stderr closes when the process does, which is what ends the
+    /// draining thread.
+    fn log(&mut self) -> String {
+        self.log
+            .take()
+            .expect("this proxy was not spawned with a captured log")
+            .join()
+            .expect("log-draining thread panicked")
     }
 
     fn send(&mut self, frame: &str) {
@@ -174,6 +215,102 @@ fn handshake(proxy: &mut ProxyUnderTest) -> serde_json::Value {
     let init = proxy.recv();
     proxy.send(r#"{"jsonrpc": "2.0", "method": "notifications/initialized"}"#);
     init
+}
+
+/// An enforced handshake withholds upstream `instructions` **and says
+/// so** — asserted through the real binary, because the log is the part
+/// an operator actually sees.
+///
+/// Both halves matter and neither implies the other. Withholding closes
+/// the leak: the field routinely carries the server's own tool names, so
+/// forwarding it discloses exactly what the filtered `tools/list` hides.
+/// The warning is what makes the cost of that honest — the agent loses
+/// guidance its server wrote for it, and the reason that trade is
+/// acceptable is that a lost capability announces itself while a leaked
+/// one does not. Silent withholding would be the trade without the
+/// property it rests on.
+#[test]
+fn an_enforced_handshake_withholds_instructions_and_warns() {
+    const LEAKY: &str = "Tools: echo, delete_file. Use delete_file to remove a path.";
+
+    let upstream = toml_path(&scripted_upstream_path());
+    let config = write_config(
+        "instructions",
+        &format!(
+            "version = 1\nprincipal = \"bot\"\n\n\
+             [[upstream]]\nname = \"fs\"\ncommand = [\"{upstream}\", \"echo\", \"{LEAKY}\"]\n\n\
+             [[grant]]\ntool = \"echo\"\n"
+        ),
+    );
+    let mut proxy = ProxyUnderTest::spawn_capturing_log(&[
+        OsString::from("--config"),
+        config.as_os_str().to_owned(),
+    ]);
+
+    let init = handshake(&mut proxy);
+    assert!(
+        init["result"].get("instructions").is_none(),
+        "the handshake disclosed upstream instructions: {init}"
+    );
+    // Not merely absent from that field: the ungranted name is nowhere
+    // in the bytes the client received.
+    assert!(
+        !init.to_string().contains("delete_file"),
+        "an ungranted tool name reached the client: {init}"
+    );
+
+    proxy.close_stdin();
+    assert!(proxy.wait_for_exit().success());
+
+    let log = proxy.log();
+    // Scoped to the warning's own line: the startup log echoes the
+    // upstream's command line, which in this fixture carries the
+    // instructions text as an argument, so a whole-log search would
+    // prove nothing about what the warning itself says.
+    let warning = log
+        .lines()
+        .find(|line| line.contains("withholding upstream instructions"))
+        .unwrap_or_else(|| {
+            panic!("withholding was silent — an operator without --trace learns nothing:\n{log}")
+        });
+    assert!(
+        warning.contains("WARN"),
+        "the withholding was not logged at WARN: {warning}"
+    );
+    assert!(
+        warning.contains("fs"),
+        "the warning does not name the upstream that went quiet: {warning}"
+    );
+    // The warning is not a second copy of the leak.
+    assert!(
+        !warning.contains("delete_file"),
+        "the warning quoted the upstream's instructions text: {warning}"
+    );
+}
+
+/// The unenforced middlebox is deliberately unchanged: it forwards
+/// `instructions`, and has nothing to warn about.
+#[test]
+fn an_unenforced_handshake_forwards_instructions_without_warning() {
+    const TEXT: &str = "Call echo with anything.";
+
+    let mut proxy = ProxyUnderTest::spawn_capturing_log(&[
+        OsString::from("--unenforced"),
+        OsString::from("--"),
+        scripted_upstream_path().into_os_string(),
+        OsString::from("echo"),
+        OsString::from(TEXT),
+    ]);
+
+    let init = handshake(&mut proxy);
+    assert_eq!(init["result"]["instructions"], TEXT);
+
+    proxy.close_stdin();
+    assert!(proxy.wait_for_exit().success());
+    assert!(
+        !proxy.log().contains("withholding upstream instructions"),
+        "an unenforced session warned about a field it forwarded"
+    );
 }
 
 #[test]

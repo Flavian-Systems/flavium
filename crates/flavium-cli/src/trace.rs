@@ -636,7 +636,15 @@ mod tests {
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("flavium-trace-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join(format!("{name}-{unique}.jsonl"))
+        let path = dir.join(format!("{name}-{unique}.jsonl"));
+        // The name is unique within a process, not across processes: the
+        // counter restarts at zero and Windows recycles pids freely. The
+        // sink appends by design (`--trace` continues a file), so a
+        // recycled pid would otherwise leave a test reading the previous
+        // run's lines too — which fails every `line_of` caller at once,
+        // as a JSON parse error nowhere near the real cause.
+        let _ = std::fs::remove_file(&path);
+        path
     }
 
     fn line_of(event: &TraceEvent) -> serde_json::Value {
