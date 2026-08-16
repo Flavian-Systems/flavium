@@ -1,15 +1,15 @@
 # T1 / M5 — enforcement wired: gate, filter, grant file, trace (plan)
 
-Status: **proposed 2026-08-16, awaiting approval.** Milestone 5 — the last
-one — of the approved [T1 plan](T1-mcp-proxy-core.md); builds on
-[M3](T1-m3-plan.md) (vocabulary) and [M4](T1-m4-plan.md) (engine). Every
-external-API claim below was run in a throwaway spike before this plan
-asserted it — `toml` 1.x's grant-file shape and what it does and does not
-refuse, `serde_json`'s number classification and duplicate-key behaviour,
-the TOML-datetime → Unix-seconds conversion against eight reference
-instants, and the path-normalization table in D4 including both of its
-false-allow directions. Statements marked *Verified* were executed; the
-rest are reasoned.
+Status: **approved 2026-08-16.** Milestone 5 — the last one — of the
+approved [T1 plan](T1-mcp-proxy-core.md); builds on [M3](T1-m3-plan.md)
+(vocabulary) and [M4](T1-m4-plan.md) (engine). Every external-API claim
+below was run in a throwaway spike before this plan asserted it — `toml`
+1.x's grant-file shape and what it does and does not refuse, `serde_json`'s
+number classification and duplicate-key behaviour, the TOML-datetime →
+Unix-seconds conversion against eight reference instants, `sha2` 0.11
+against the standard SHA-256 vectors, and the path-normalization table in
+D4 including both of its false-allow directions. Statements marked
+*Verified* were executed; the rest are reasoned.
 
 ## Context
 
