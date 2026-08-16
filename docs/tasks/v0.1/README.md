@@ -26,7 +26,7 @@ where the backend streams.
 **Done when:** a deliberately looping agent is killed at its cap, in both
 tool-call count and token spend, with the denial traced.
 
-## T3 — Attenuated delegation \& supervision
+## T3 — Attenuated delegation & supervision
 
 Spawning sub-agents with grant sets that are provably subsets of the
 parent's on every axis (the `attenuates` invariant in flavium-core),
@@ -35,7 +35,7 @@ enforced at spawn. Budget exhaustion becomes a supervised failure
 **Done when:** a parent cannot mint authority it lacks; a child's breach
 surfaces as a supervision event, not silent misbehavior.
 
-## T4 — Flight recorder \& replay
+## T4 — Flight recorder & replay
 
 Append-only, hash-chained event log in SQLite with a versioned public
 schema: every call, decision, denial, budget tick, spawn, termination.
@@ -60,7 +60,21 @@ agents assist with examples and docs.
 
 ## Ground rules
 
-- One plan file per task, approved before code. Keep plans ≤1 page.
+- **One plan file per task, approved before code.** Long tasks also get
+  one plan per milestone beside it (`T1-m3-plan.md`, `T1-m4-plan.md`,
+  `T1-m5-plan.md`). The original "keep plans ≤1 page" rule did not
+  survive T1 and is retired: the milestone plans run 300–700 lines
+  because each decision states what it is, **why**, and **what it rules
+  out**, with the option space listed where more than two candidates
+  were considered. That is the audit trail an auditor and a future
+  contributor read to understand why the enforcement core looks the way
+  it does, and a decision without its rejected alternative is
+  unauditable. Length is a consequence, not a goal.
+- **A plan is not edited after approval.** When the milestone contradicts
+  it, the *task* file gains an "M<n> note — where this plan was wrong"
+  section listing each deviation and why (see the end of
+  `T1-mcp-proxy-core.md`). A plan the code has quietly diverged from is
+  worse than no plan, because it is still read as the audit trail.
 - Acceptance criteria above are contractual (grant milestones) — scope
-&#x20; changes need explicit human sign-off.
+  changes need explicit human sign-off.
 - Everything in CLAUDE.md applies, especially the flavium-core rules.

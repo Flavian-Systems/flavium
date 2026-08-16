@@ -2,9 +2,12 @@
 //! poking at the proxy by hand:
 //!
 //! ```text
-//! cargo run -p flavium --bin flavium -- proxy -- \
+//! cargo run -p flavium --bin flavium -- proxy --unenforced -- \
 //!     target/debug/examples/scripted_upstream
 //! ```
+//!
+//! (`--unenforced` because the `-- <COMMAND>` shorthand has nowhere to
+//! put grants; since M5 it is refused without the flag.)
 //!
 //! It answers `initialize` (protocol version 2025-11-25), `tools/list`
 //! (one tool, named by the first argument, default `echo`), and

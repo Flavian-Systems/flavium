@@ -322,8 +322,8 @@ The terms below are Cedar's, as flavium uses them (M4,
 user to write Cedar — grants are compiled into it.
 
 - **Cedar** — the open-source authorization policy language and engine
-  (`cedar-policy`, pinned 4.12) flavium evaluates every tool call
-  against. Chosen because it has a formal semantics and a mechanised
+  (`cedar-policy` 4.12, a semver-compatible range rather than an `=`
+  pin) flavium evaluates every tool call against. Chosen because it has a formal semantics and a mechanised
   model behind it (DESIGN §6), so the policy-evaluation half of the
   verification story is someone else's proven work.
 - **Policy** — one authorization rule. It has an **effect** (`permit` or
