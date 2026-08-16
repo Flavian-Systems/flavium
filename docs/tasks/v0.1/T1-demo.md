@@ -21,6 +21,15 @@ wire only — Claude Desktop's UI shows the config entry name regardless;
 see *Checking the wire directly* below), and there are *two* handshakes
 to verify in the log instead of one.
 
+**Since M5 every command in this file carries `--unenforced`.** The
+checklist rows below M1/M2 are the *transparent* proxy, and M5 made that
+posture something an operator asks for by name: the `-- <COMMAND>`
+shorthand has nowhere to put grants and now refuses without the flag
+(`the -- <COMMAND> shorthand cannot carry grants`), and a config file
+without `version` or without `[[grant]]` entries refuses too. The
+commands were updated in place — the *recorded runs* at the bottom
+predate the flag and are left as they were run.
+
 ## Setup
 
 1. Build: `cargo build --release`. The binary is
@@ -35,7 +44,7 @@ to verify in the log instead of one.
      "mcpServers": {
        "filesystem": {
          "command": "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\target\\release\\flavium.exe",
-         "args": ["proxy", "--", "npx.cmd", "-y",
+         "args": ["proxy", "--unenforced", "--", "npx.cmd", "-y",
                   "@modelcontextprotocol/server-filesystem",
                   "C:\\Users\\flavi\\Desktop"]
        }
@@ -80,9 +89,9 @@ to verify in the log instead of one.
       out-of-envelope one is denied, and both are in the trace. Worked
       example below.
 
-Note that since M5 the `-- <COMMAND>` shorthand above requires
-`--unenforced`; the M1/M2 rows of this checklist are the unenforced
-proxy, and the M5 section is the enforced one.
+The M1/M2 rows of this checklist are the unenforced proxy; the M5
+section below is the enforced one, and it is the only part still
+outstanding.
 
 ## Checking the wire directly
 
@@ -95,7 +104,7 @@ send one `initialize` frame by hand and read the first stdout line
 **cmd.exe** (works as is):
 
 ```bat
-echo {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}} | target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>nul
+echo {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}} | target\release\flavium.exe proxy --unenforced -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>nul
 ```
 
 **Windows PowerShell 5.1** — set the pipe encoding first, or the frame
@@ -105,17 +114,21 @@ frame, not a proxy bug:
 
 ```powershell
 $OutputEncoding = New-Object Text.UTF8Encoding $false
-'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' | .\target\release\flavium.exe proxy -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>$null | Select-Object -First 1
+'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' | .\target\release\flavium.exe proxy --unenforced -- npx.cmd -y @modelcontextprotocol/server-filesystem C:\Users\flavi\Desktop 2>$null | Select-Object -First 1
 ```
 
-(macOS/Linux: the same `echo … | flavium proxy -- npx …` works in any
-shell.)
+(macOS/Linux: the same `echo … | flavium proxy --unenforced -- npx …`
+works in any shell.)
 
-Expected first line, observed 2026-08-15 against the M2 build:
+Expected first line, re-observed 2026-08-16 against the M5 build:
 
 ```json
-{"jsonrpc":"2.0","id":0,"result":{"capabilities":{"tools":{"listChanged":true}},"protocolVersion":"2025-11-25","serverInfo":{"name":"flavium","title":"Flavium MCP proxy","version":"0.1.0-alpha.0"}}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"flavium","title":"Flavium MCP proxy","version":"0.1.0-alpha.0"}}}
 ```
+
+(The M2 build emitted the same three members with `capabilities` first;
+member order in a JSON object carries no meaning, and nothing asserts it
+— compare the values, not the bytes.)
 
 On the M1 build the same command returned the upstream's own
 `serverInfo` (`secure-filesystem-server` 0.2.0) — that difference is
@@ -132,6 +145,8 @@ via `npx`, a completely different tool family, no name overlap with
 the filesystem server.
 
 ```toml
+version = 1
+
 [[upstream]]
 name = "fs"
 command = ["npx.cmd", "-y", "@modelcontextprotocol/server-filesystem",
@@ -143,14 +158,16 @@ command = ["npx.cmd", "-y", "@modelcontextprotocol/server-memory"]
 ```
 
 Claude Desktop entry (name it `flavium` — the log file follows the
-entry name, so it lands in `mcp-server-flavium.log`):
+entry name, so it lands in `mcp-server-flavium.log`). This variant is
+about *routing*, so it declares no grants and therefore needs
+`--unenforced`; the grant-bearing version is the M5 variant below:
 
 ```json
 {
   "mcpServers": {
     "flavium": {
       "command": "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\target\\release\\flavium.exe",
-      "args": ["proxy", "--config",
+      "args": ["proxy", "--unenforced", "--config",
                "D:\\flavi\\Projects\\Flavian-Systems\\flavium\\flavium.toml"]
     }
   }

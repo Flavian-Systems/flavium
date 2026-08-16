@@ -8,7 +8,10 @@ map for readers and reviewers, not a specification —
 [the T1 plan](../tasks/v0.1/T1-mcp-proxy-core.md) for what this crate
 must deliver. Where this document and the code disagree, the code is
 right and this document has a bug. Vocabulary is fixed in
-[GLOSSARY.md](../GLOSSARY.md).
+[GLOSSARY.md](../GLOSSARY.md). The two crates behind the gate this one
+calls — the grant model, the reference semantics, attenuation, the trace
+vocabulary and the Cedar engine — are documented in
+[core-and-policy.md](core-and-policy.md).
 
 M3 added the types, traits and trace vocabulary in `flavium-core`, M4
 the Cedar engine in `flavium-policy`, and M5 wired both in (§10): every
@@ -763,6 +766,11 @@ Only `ProxyConfig` is runtime-configurable today; the CLI passes
 
 Landed in M5. What follows is where each piece lives, not a forecast.
 
+Both crates named below have their own architecture document —
+[core-and-policy.md](core-and-policy.md) — covering the grant model, the
+reference semantics, attenuation, the trace catalog, and the compilation
+into Cedar. What follows is only the seam.
+
 - **The vocabulary (M3, `flavium-core`).** `GrantEnvelope` (principal +
   grants), `Grant`/`Constraint`/`ArgValue`, `ToolCall`,
   `Decision`/`DenialReason`, the reference `decide`, `attenuates`, and
@@ -835,7 +843,7 @@ Landed in M5. What follows is where each piece lives, not a forecast.
 | Where | What it pins |
 |---|---|
 | `tests/router_session.rs` (22 tests) | The M2 contract end to end over in-memory pipes with two scripted upstreams: proxy-answered `initialize`, per-upstream handshakes, merged and drained `tools/list`, routing by name with ids translated both ways, cancellation and late-response drops, collisions, `list_changed` re-lists, phase gating, and the T1 acceptance criterion that `params`/`result` bytes round-trip identically. Since M5 every one of these sessions runs **through the gate** on a permissive envelope, assertions unchanged — which is what makes the suite the regression net for I16. |
-| `tests/enforcement_gate.rs` (11 tests) | What the gate decides, at the wire. The per-axis denial table (path outside prefix including `../` and `..\`, off-pattern recipient, out-of-range and wrong-typed and unrepresentable numbers, `Absent` violated, expired grant, ungranted tool), each asserting three things: the upstream never saw the call, the exact client bytes, and the trace event. Plus: the allowed normalized paths; I16 byte identity; the filtered list moving as a grant expires over a settable clock; duplicate keys refused; `EvaluationError` through a stub `Authorizer` (unreachable from a grant file by construction); a sink failure ending the session (I15); a full causal transcript; cancelled and abandoned completions; and the unenforced path. |
+| `tests/enforcement_gate.rs` (13 tests) | What the gate decides, at the wire. The per-axis denial table (path outside prefix including `../` and `..\`, off-pattern recipient, out-of-range and wrong-typed and unrepresentable numbers, `Absent` violated, expired grant, ungranted tool), each asserting three things: the upstream never saw the call, the exact client bytes, and the trace event. Plus: the allowed normalized paths; I16 byte identity; the filtered list moving as a grant expires over a settable clock; duplicate keys refused; `EvaluationError` through a stub `Authorizer` (unreachable from a grant file by construction); a sink failure ending the session (I15); a full causal transcript; cancelled and abandoned completions; and the unenforced path. |
 | `tests/http_upstream.rs` (3 tests) | The streamable-HTTP transport against a real in-process axum server: session id assigned at `initialize` and required afterwards, protocol-version header, 202 for notifications, JSON and SSE bodies (multi-line data exercising newline normalization), the GET stream, DELETE at close, 404 after expiry. |
 | `crates/flavium-cli/tests/proxy_e2e.rs` (11 tests) | The real binary over real child processes (`examples/scripted_upstream`), with the **real Cedar engine** and a real trace file on disk: config-file and `--unenforced -- command` forms, multi-upstream merge, collision refusal, exit codes — and the enforcement path end to end (filtered list, allow, out-of-envelope denial, traversal denial, ungranted tool, the JSONL transcript), a grant-less config refusing to start, and `--unenforced` refusing `--trace`. |
 | Unit tests in each module | The parser boundaries (`framing`, `sse`, `envelope`, `splice`) — including the failing paths: oversized, invalid UTF-8, `id: null`, duplicate members, batches; `normalize`'s two-flavor table and the two false allows it exists to close; `args`'s classification table and its duplicate-key refusal (paired with the assertion that a plain `BTreeMap` would silently take the second value); `idmap` translation and cancel semantics; `toolset` merge/collision/filter; `builder` escaping; `protocol` version policy; `http` setup redaction. |

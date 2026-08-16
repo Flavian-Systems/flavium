@@ -82,7 +82,7 @@ Enforcement deepens over time without changing the policy model: proxy enforceme
 | v0.2 | Kernel-level sandboxing; LLM proxy with mid-generation budget kills; deterministic replay tooling |
 | v0.3 | Wasm isolation; machine-checked confinement core; compliance/audit exports |
 
-See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest boundaries, and [docs/architecture/proxy-mcp.md](docs/architecture/proxy-mcp.md) for how the MCP proxy crate is built — modules, tasks, message flows, invariants.
+See [DESIGN.md](DESIGN.md) for the full architecture, threat model, and honest boundaries; [docs/architecture/core-and-policy.md](docs/architecture/core-and-policy.md) for the enforcement core — what a grant is, what it means, how it attenuates, and how it becomes a Cedar policy, with one grant followed end to end from a line of TOML to a line of trace; and [docs/architecture/proxy-mcp.md](docs/architecture/proxy-mcp.md) for how the MCP proxy crate is built — modules, tasks, message flows, invariants.
 
 ## Contributing
 

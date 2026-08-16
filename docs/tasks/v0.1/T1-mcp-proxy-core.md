@@ -101,11 +101,18 @@ face; MCP 2026-07-28 "modern era".
 - flavium-core: **none** — stays zero-dependency. Flagged deviation:
   hand-rolled Error impls instead of thiserror, keeping the verification
   target minimal.
-- flavium-policy: **cedar-policy** (pinned 4.12) — the mandated engine;
-  heavy (~50 crates), confined behind the authorize trait; **serde_json**
-  (build policy JSON safely); **thiserror** (errors convention).
+- flavium-policy: **cedar-policy** 4.12 — the mandated engine; heavy
+  (68 crates transitively, measured at M5), confined behind the
+  authorize trait; **serde_json** (build policy JSON safely);
+  **thiserror** (errors convention). Written as the workspace's usual
+  semver-compatible range rather than an `=` pin: the drift worth
+  catching is a change to the EST or the diagnostics API, and an API
+  change fails to compile while an encoding change fails
+  `a_representative_grant_renders_as_expected` (M4 plan, note 3).
 - Unrestricted crates, listed for transparency: proxy — tokio, serde,
-  serde_json, thiserror, tracing, reqwest, eventsource-stream; cli —
+  serde_json, thiserror, tracing, reqwest, futures-util (**not**
+  `eventsource-stream`, per the deviation recorded above; `axum` is
+  dev-only, for the in-process HTTP upstream in the tests); cli —
   clap, toml, tracing-subscriber, **and `sha2`** (added at M5, approved
   in chat 2026-08-16, for the trace's truncation digest; T4's
   hash-chained recorder needs a cryptographic hash regardless, so it is

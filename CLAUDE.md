@@ -20,12 +20,19 @@ core and future formal-verification target**. In these two crates:
 
 ## Workspace layout
 
-- `crates/flavium-core` — grant/principal/budget/trace types + invariants
-- `crates/flavium-policy` — Cedar evaluation + stateful budget metering
-  (both must pass for a call to proceed)
+- `crates/flavium-core` — grant/principal/trace types, the reference
+  decision semantics, the attenuation invariant
+- `crates/flavium-policy` — Cedar evaluation
 - `crates/flavium-proxy-mcp` — MCP middlebox (server to clients, client
   to upstream tool servers)
 - `crates/flavium-cli` — the `flavium` binary
+
+The budget axis is **T2 and not modelled yet** — no `budget` field on
+`Grant`, no metering in flavium-policy, and a `budget` key in a grant
+file is a startup error rather than a silently accepted one. DESIGN §4's
+"Cedar evaluation plus stateful budget metering, both must pass" is where
+this lands; do not write it as though it already does. How the two crates
+work today: [docs/architecture/core-and-policy.md](docs/architecture/core-and-policy.md).
 
 ## Workflow (matches CI exactly)
 

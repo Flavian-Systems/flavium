@@ -6,8 +6,11 @@ servers. This page is the operator's reference: commands and flags, the
 `flavium.toml` config file, what goes to stdout and stderr, exit codes,
 startup errors and how to fix them, the trace file, and how to wire the
 proxy into a client. How the proxy works inside is in
-[docs/architecture/proxy-mcp.md](architecture/proxy-mcp.md); vocabulary
-is in [GLOSSARY.md](GLOSSARY.md).
+[docs/architecture/proxy-mcp.md](architecture/proxy-mcp.md), and what a
+grant *means* — the model, attenuation, the Cedar compilation, and one
+grant followed from TOML to trace — is in
+[docs/architecture/core-and-policy.md](architecture/core-and-policy.md);
+vocabulary is in [GLOSSARY.md](GLOSSARY.md).
 
 Since M5 the proxy **enforces**: the client is shown only the tools the
 grant file names, every `tools/call` is authorized before it is
@@ -241,7 +244,10 @@ argument that matters, and close the rest with `absent`.
 
 Comparison is byte-wise and fails closed: a constrained argument that is
 missing (except under `absent`), of the wrong type, or of a shape the
-core does not model is **not** admitted.
+core does not model is **not** admitted. The full semantics of each
+constraint — including what happens when several grants name one tool,
+and what a grant compiles to — are in
+[docs/architecture/core-and-policy.md](architecture/core-and-policy.md).
 
 ### Path normalization, and why the flavor is yours to declare
 
