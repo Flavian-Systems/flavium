@@ -25,10 +25,16 @@
 //! The normalizer is total, pure, byte level, and does no I/O: separators
 //! unified, repeated separators collapsed — *except* a leading run of two
 //! or more, which is a different root (see [`normalize`]) — `.` segments
-//! dropped, `..` resolved against the previous segment, never escaping the
-//! root of an absolute path, a leading `..` of a relative path kept,
+//! dropped, `..` resolved against the previous segment and never escaping
+//! the root of an absolute path, a leading `..` of a relative path kept,
 //! trailing separator dropped from a value and kept on a prefix, and —
 //! **under [`PathFlavor::Windows`] only** — ASCII case folded.
+//!
+//! Under that same Windows flavor the root includes the *names* in it — a
+//! UNC server and share, or a drive letter — because the platform clamps
+//! `..` at both. Without that, `..` popped the server name and a later
+//! segment supplied a different one, so a grant on one file server
+//! admitted a value naming another machine.
 //!
 //! Case folding follows the same reasoning as the separator: it is part of
 //! the resolution rule the operator declared, not a guess about the host.
@@ -138,7 +144,17 @@ impl PathFlavor {
 /// | `../a` | `../a` | `../a` |
 /// | `` (empty) | `` | `` |
 /// | `\\server\share\x` | `\\server\share\x` | `//server/share/x` |
+/// | `\\server\share\..\..\x` | `\\server\share\..\..\x` | `//server/share/x` |
+/// | `C:\..\x` | `C:\..\x` | `c:/x` |
 /// | `/DATA/x` | `/DATA/x` | `/data/x` |
+///
+/// The two `..` rows are the root *pinning*: under `Windows` a UNC root
+/// owns its server and share and a drive-rooted path owns its drive, so
+/// `..` clamps there exactly as the platform clamps it. A POSIX `//` root
+/// is deliberately left unpinned — its meaning is implementation-defined,
+/// and pinning names that may not be there would *admit* `//a/b/../../x`
+/// under a grant on `//a/b/`, inventing a false allow rather than closing
+/// one.
 ///
 /// The `Windows` column is ASCII lowercase throughout: that flavor folds
 /// case (see the module docs), because Windows resolves paths that differ
@@ -164,24 +180,50 @@ pub fn normalize(value: &str, flavor: PathFlavor) -> String {
         _ => "//",
     };
     let mut segments: Vec<&str> = Vec::new();
-    let absolute = !root.is_empty();
-    for segment in value.split(|c| flavor.is_separator(c)) {
-        match segment {
-            // Repeated separators, and a trailing one, produce empty
-            // segments; `.` is the current directory. Both are dropped.
-            "" | "." => {}
-            ".." => match segments.last() {
-                // A relative path may start with `..`, and further `..`
-                // stack onto it — there is no known parent to cancel.
-                Some(&"..") | None if !absolute => segments.push(".."),
-                // An absolute path's root is its own parent: `/..` is `/`.
-                None => {}
-                Some(_) => {
-                    segments.pop();
+    let absolute = !root.is_empty() || drive_rooted(value, flavor);
+    let mut parts = value
+        .split(|c| flavor.is_separator(c))
+        // Repeated separators, and a trailing one, produce empty
+        // segments; `.` is the current directory. Both are dropped.
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .peekable();
+    // The leading segments that belong to the *root* rather than to the
+    // path within it, and that `..` therefore may not climb past. Taking
+    // them first is what pins them: everything after this is ordinary.
+    // A `..` is never pinned — it is left for the loop below, which drops
+    // it against the root the way it drops the `..` of `/..`.
+    for _ in 0..authority_segments(value, root, flavor) {
+        match parts.peek() {
+            Some(&"..") | None => break,
+            Some(_) => {
+                if let Some(segment) = parts.next() {
+                    segments.push(segment);
                 }
-            },
-            other => segments.push(other),
+            }
         }
+    }
+    let floor = segments.len();
+    for segment in parts {
+        if segment != ".." {
+            segments.push(segment);
+            continue;
+        }
+        if segments.len() > floor {
+            // A `..` that a relative path stacked has no known parent to
+            // cancel; anything else above the floor is cancelled.
+            if segments.last() == Some(&"..") {
+                segments.push("..");
+            } else {
+                segments.pop();
+            }
+        } else if !absolute {
+            // A relative path may start with `..`, and further `..` stack
+            // onto it — there is no known parent to cancel.
+            segments.push("..");
+        }
+        // At the floor of an absolute path there is nothing above to
+        // reach: the root is its own parent, so `/..` is `/` and
+        // `\\server\share\..` stays on that share.
     }
     let joined = segments.join("/");
     let mut out = String::with_capacity(root.len() + joined.len());
@@ -195,6 +237,52 @@ pub fn normalize(value: &str, flavor: PathFlavor) -> String {
         out.make_ascii_lowercase();
     }
     out
+}
+
+/// Does this value begin `X:\` or `X:/` — a drive-rooted Windows path?
+///
+/// Only the unambiguous spelling counts. `C:\x` is rooted at that drive;
+/// `C:x` is *drive-relative* (it means "x under the current directory of
+/// drive C"), a different thing this module does not model, so it is left
+/// to the relative rules.
+fn drive_rooted(value: &str, flavor: PathFlavor) -> bool {
+    if flavor != PathFlavor::Windows {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
+/// How many leading segments belong to the root, and so cannot be popped
+/// by a `..`.
+///
+/// Zero for everything except the two Windows spellings whose root has a
+/// *name* in it: a UNC path owns its server and share, and a drive-rooted
+/// path owns its drive. Windows clamps `..` at both — `\\server\share\..`
+/// stays on that share and `C:\..` stays on that drive — and matching it
+/// is what keeps a grant on one file server from admitting a value that
+/// names another. Without the pin, `..` pops the server name and a later
+/// segment supplies a different one, so `\\attacker\pub\..\..\fileserver\
+/// reports\x` reads as `//fileserver/reports/x`: the gate would judge a
+/// string the upstream never resolves to, which is a false allow.
+///
+/// A POSIX `//` root is deliberately *not* pinned. Its meaning is
+/// implementation-defined, and on the common implementation where `//` is
+/// simply `/` there is no name in the root to protect; pinning segments
+/// there would make `//a/b/../../x` read as `//a/b/x` and *admit* it under
+/// a grant on `//a/b/`, inventing a false allow rather than closing one.
+fn authority_segments(value: &str, root: &str, flavor: PathFlavor) -> usize {
+    match flavor {
+        PathFlavor::Posix => 0,
+        // `\\server\share`.
+        PathFlavor::Windows if root == "//" => 2,
+        // `C:\`.
+        PathFlavor::Windows if drive_rooted(value, flavor) => 1,
+        PathFlavor::Windows => 0,
+    }
 }
 
 /// Normalizes one path *prefix* — what a grant wrote.
@@ -382,6 +470,78 @@ mod tests {
         assert_eq!(posix, "/data/Invoices/");
         assert!(!normalize("/data/invoices/x", PathFlavor::Posix).starts_with(&posix));
         assert!(normalize("/data/Invoices/x", PathFlavor::Posix).starts_with(&posix));
+    }
+
+    /// `..` may not climb out of a root that has a *name* in it.
+    ///
+    /// The finding this closes: the server and share were ordinary
+    /// segments, so `\\attacker\pub\..\..\fileserver\reports\x` popped
+    /// `attacker` and read as `//fileserver/reports/x`. A grant on
+    /// `\\fileserver\reports\` admitted it, while Windows itself clamps
+    /// `..` at the share and writes to `\\attacker\pub\fileserver\…` —
+    /// two different machines, one string. The drive rows are the same
+    /// defect one root down.
+    #[test]
+    fn dotdot_cannot_climb_out_of_a_named_root() {
+        let grant = normalize_prefix(r"\\fileserver\reports\", PathFlavor::Windows);
+        assert_eq!(grant, "//fileserver/reports/");
+        for denied in [
+            r"\\attacker.example.com\pub\..\..\fileserver\reports\leak.txt",
+            r"\\attacker\pub\..\..\..\..\fileserver\reports\leak.txt",
+            r"\\attacker\fileserver\..\reports\leak.txt",
+        ] {
+            assert!(
+                !normalize(denied, PathFlavor::Windows).starts_with(&grant),
+                "climbed out of a UNC root: {denied:?}"
+            );
+        }
+        // The share is its own parent, exactly as on the platform.
+        for (value, expected) in [
+            (r"\\server\share\..\..\x", "//server/share/x"),
+            (r"\\server\share\a\..\b", "//server/share/b"),
+            (r"\\server\share\..", "//server/share"),
+            (r"\\server\..", "//server"),
+            (r"\\server\share", "//server/share"),
+        ] {
+            assert_eq!(normalize(value, PathFlavor::Windows), expected, "{value:?}");
+        }
+        // Legitimate movement inside the share still normalizes.
+        assert!(
+            normalize(r"\\fileserver\reports\q1\..\2026\x", PathFlavor::Windows)
+                .starts_with(&grant)
+        );
+
+        // A drive root is a name too: `C:\..` stays on C:, so a value
+        // that starts on a drive can never fall into a relative grant.
+        for (value, expected) in [
+            (r"C:\..\x", "c:/x"),
+            (r"C:\Users\..\..\..\x", "c:/x"),
+            (r"C:\Users\me\..\other", "c:/users/other"),
+        ] {
+            assert_eq!(normalize(value, PathFlavor::Windows), expected, "{value:?}");
+        }
+        let relative = normalize_prefix(r"data\", PathFlavor::Windows);
+        assert_eq!(relative, "data/");
+        assert!(
+            !normalize(r"C:\..\data\x", PathFlavor::Windows).starts_with(&relative),
+            "a drive-rooted value fell into a relative grant"
+        );
+        // `C:x` is drive-*relative*, a different spelling this module does
+        // not model as rooted. With no separator after the drive there is
+        // no `..` segment to resolve either — `C:..` is one opaque name —
+        // so it matches neither a drive-rooted nor a relative grant.
+        assert_eq!(normalize(r"C:..\x", PathFlavor::Windows), "c:../x");
+
+        // POSIX is deliberately unchanged: `//` has no name to protect,
+        // and pinning there would invent a false allow.
+        for (value, expected) in [
+            ("//a/b/../../x", "//x"),
+            ("/..", "/"),
+            ("../a", "../a"),
+            ("/data/invoices/../../etc/passwd", "/etc/passwd"),
+        ] {
+            assert_eq!(normalize(value, PathFlavor::Posix), expected, "{value:?}");
+        }
     }
 
     /// A prefix must never come out wider than it went in.

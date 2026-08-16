@@ -366,17 +366,56 @@ impl ArgEntry {
         ] {
             let Some(raw) = raw else { continue };
             let normalized = normalize_prefix(raw, flavor);
-            // `.`, `./`, `a/..` and friends reduce to nothing, and an
-            // empty prefix admits **every** string — the widest possible
-            // constraint, produced by normalization rather than written.
-            // That is the one direction the design says must never
-            // happen, so it stops the process instead of being warned
-            // about. (`/` is different: an operator who writes the root
-            // has said what they meant.)
-            if normalized.is_empty() {
+            // A path prefix is enforced as a *byte* prefix, so it is only
+            // a statement about a directory while byte containment and
+            // path containment agree. Three spellings break that, each
+            // producing a constraint far wider than the one written, and
+            // each is refused rather than warned about: the design says
+            // normalization must never widen, and these widen at the
+            // moment of compiling.
+            let degenerate = if normalized.is_empty() {
+                // `.`, `./`, `a/..` — reduce to nothing, and an empty
+                // prefix admits every string.
+                Some("normalizes to nothing and would therefore admit every path")
+            } else if normalized == "/" {
+                // The local root is a byte prefix of the *other* root:
+                // `"//host/share/x".starts_with("/")`. So a grant on the
+                // current drive would admit a write to an arbitrary SMB
+                // host — two machines, one string. There is no byte
+                // prefix that means "this root and not that one".
+                Some(
+                    "is the bare root, which as a byte prefix also admits every `//`-rooted \
+                     (UNC) path on any host",
+                )
+            } else if normalized.split('/').any(|segment| segment == "..")
+                && normalized
+                    .split('/')
+                    .all(|segment| segment.is_empty() || segment == "..")
+            {
+                // `..`, `../`, `a/../..` — every segment climbs. Further
+                // `..` *stack* rather than cancel, so `"../../etc/passwd"`
+                // byte-starts-with `"../"` while sitting a level higher
+                // than the prefix names; the grant reaches every ancestor.
+                Some(
+                    "names only ancestors, and further `..` stack rather than cancel, so it \
+                     admits paths above the one it names",
+                )
+            } else {
+                None
+            };
+            if let Some(why) = degenerate {
                 return Err(format!(
-                    "argument {argument:?} has a `{key}` of {raw:?}, which normalizes to nothing \
-                     and would therefore admit every path; write the directory you mean"
+                    "argument {argument:?} has a `{key}` of {raw:?}, which {why}; write the \
+                     directory you mean"
+                ));
+            }
+            // A NUL cannot appear in a pathname on any platform flavium
+            // targets, and a consumer that stops at one would act on a
+            // different resource than the one compared here.
+            if normalized.contains('\0') {
+                return Err(format!(
+                    "argument {argument:?} has a `{key}` of {raw:?}, which contains a NUL byte; \
+                     that cannot name a path on any supported platform"
                 ));
             }
             found.push((Constraint::Prefix(normalized), Some(flavor)));
@@ -711,14 +750,55 @@ path = { windows-path-prefix = 'C:\Users\me\Desktop\' }
         ));
         assert!(windows.contains("normalizes to nothing"), "{windows}");
 
-        // The root itself is not degenerate: an operator who writes `/`
-        // has said what they meant.
-        let root = ok(&with_grants(
+        // The bare root *is* degenerate, and this reverses an earlier
+        // reading of it ("an operator who writes `/` has said what they
+        // meant"). What they mean cannot be enforced: the constraint is a
+        // byte prefix, and `"//host/share/x".starts_with("/")`, so a grant
+        // on the local root also admits every UNC path — a write to an
+        // arbitrary SMB host under a grant that named this machine. No
+        // byte prefix separates the two roots, so the spelling is refused
+        // instead of compiled into a wider grant than it looks.
+        for root in ["/", "\\"] {
+            let message = err(&with_grants(&format!(
+                "[[grant]]\ntool = \"t\"\n[grant.args]\np = {{ windows-path-prefix = '{root}' }}\n"
+            )));
+            assert!(message.contains("bare root"), "{root:?}: {message}");
+        }
+        let posix_root = err(&with_grants(
             "[[grant]]\ntool = \"t\"\n[grant.args]\np = { path-prefix = \"/\" }\n",
         ));
+        assert!(posix_root.contains("bare root"), "{posix_root}");
+        // The UNC root is not refused: it admits exactly what it says,
+        // every `//`-rooted path, and no other root hides inside it.
+        let unc = ok(&with_grants(
+            "[[grant]]\ntool = \"t\"\n[grant.args]\np = { path-prefix = \"//\" }\n",
+        ));
         assert_eq!(
-            root.grants.unwrap().envelope.grants[0].constraints.get("p"),
-            Some(&Constraint::Prefix("/".into()))
+            unc.grants.unwrap().envelope.grants[0].constraints.get("p"),
+            Some(&Constraint::Prefix("//".into()))
+        );
+
+        // A prefix of nothing but `..` reaches above what it names,
+        // because further `..` stack rather than cancel: `"../../etc"`
+        // byte-starts-with `"../"`. Every ancestor is in the grant.
+        for ancestors in ["..", "../", "../../", "a/../..", "..\\"] {
+            let message = err(&with_grants(&format!(
+                "[[grant]]\ntool = \"t\"\n[grant.args]\np = {{ windows-path-prefix = '{ancestors}' }}\n"
+            )));
+            assert!(
+                message.contains("names only ancestors"),
+                "{ancestors:?}: {message}"
+            );
+        }
+        // A `..` that leads somewhere specific is still a real directory.
+        let relative = ok(&with_grants(
+            "[[grant]]\ntool = \"t\"\n[grant.args]\np = { path-prefix = \"../data/\" }\n",
+        ));
+        assert_eq!(
+            relative.grants.unwrap().envelope.grants[0]
+                .constraints
+                .get("p"),
+            Some(&Constraint::Prefix("../data/".into()))
         );
 
         // A path flavor and a byte prefix on the same argument are two

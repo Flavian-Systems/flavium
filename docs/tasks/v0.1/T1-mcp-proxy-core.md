@@ -275,3 +275,76 @@ non-defects: `path-prefix` without a trailing separator admitting sibling
 names (that is documented byte-prefix behaviour — write the separator),
 and the granted directory itself never matching its own prefix (a false
 denial, and the conservative reading).
+
+## Where the M5 fixes were still wrong — the post-T1 bug hunt
+
+A second adversarial multi-lens review, run against `863ea59` after T1
+closed, found fourteen defects behind a green gate of 289 tests. **Five
+were false allows**, and four of those were in `normalize.rs` and its
+loader guard — the module written to close exactly this class, whose own
+M5 note above says the lesson was *"test the invariant at the degenerate
+inputs"*. It had been applied to half the degenerate space. Those five
+are fixed here; the rest are listed at the end of this section.
+
+1. **The bare root was accepted, and it crosses roots.** The M5 note
+   above says `"/"` is fine because "an operator who writes the root has
+   said what they meant" — **that is now reversed**. What they meant
+   cannot be expressed as a byte prefix: `"//host/share/x"` starts with
+   `"/"`, so a grant on this machine's root also admitted a write to an
+   arbitrary SMB host. The very separation defect 2 above introduced —
+   local root distinct from UNC root — is defeated at the one value where
+   the two roots share a prefix. Refused at load time now, alongside the
+   empty prefix. *The generalisation: a fix that makes two things
+   distinguishable has to be checked at the value where one is a prefix
+   of the other.*
+2. **The degenerate-prefix guard covered `.` and not `..`.**
+   `path-prefix = "../"` loaded clean and admitted `../../etc/passwd`,
+   because `normalize` *stacks* leading `..` rather than cancelling them,
+   so byte containment stops being path containment. Same shape as
+   defect 1 in the M5 list, same module, missed because the degenerate
+   table listed the `.`-relative spellings only. Refused now.
+3. **`..` climbed out of a UNC root.** The server and share were ordinary
+   poppable segments, so `\attacker\pub\..\..\fileserver\reports\x`
+   read as `//fileserver/reports/x` and passed a grant on
+   `\fileserver\reports\` — while Windows clamps `..` at the share and
+   writes to the attacker's host. Defect 2 above kept the *root* distinct
+   but left the names inside it poppable, which is the same collapse one
+   level down. The root is flavor-aware now: under Windows a UNC server
+   and share, and a drive letter, are pinned. A POSIX `//` root is
+   deliberately *not* pinned — there are no names in it to protect, and
+   pinning would have invented a false allow rather than closing one.
+4. **A `list_changed` re-list could move a granted tool to another
+   upstream.** A `Grant` names a tool, not an upstream, so the binding
+   lives only in `ToolSet`. `ToolSet::build` refuses two upstreams
+   claiming one name at the same instant, but drop-then-claim across two
+   re-lists reached that end state one step at a time, silently, and the
+   grant still matched by name — so the call was allowed and forwarded to
+   a server the config never granted. The session now ends
+   (`SessionEnd::ToolRebound`) the way the one-step case does. *The
+   generalisation: a check that rejects a bad state must also reject
+   every path that reaches it incrementally.*
+5. **A NUL let the normalizer cancel a segment the upstream still sees.**
+   `/etc/passwd\0/../../data/invoices/x` reduced to `/data/invoices/x` —
+   inside the grant — while the raw bytes crossed to the upstream, where
+   a consumer that stops at the NUL opens `/etc/passwd`. The gate decided
+   about a string no upstream resolves to. Such a value now becomes
+   `ArgValue::Other`, which no constraint admits, and the spelling still
+   reaches the trace via `args_as_sent`.
+
+Nine further defects were confirmed and are **not** fixed here, to keep
+this change to the authority axis: `initialize` forwards each upstream's
+`instructions` unfiltered (an info leak naming tools the filtered
+`tools/list` hides); the `classify` arm commented "Unreachable" is
+reachable via a lone-surrogate escape; a 202 to a request POST is treated
+as success so the call never completes; a pre-epoch clock un-expires
+grants while the rustdoc claims the opposite direction; a stale
+`insert_client` never releases its progress-token scope; the connection
+actor stops draining the upstream while parked on a full outbound queue;
+the `tools/list` size guard budgets a flat 64 bytes for a
+client-controlled id; the in-flight tables are unbounded; and the HTTP
+client has no request or read timeout.
+
+**Calibration, since this now has three data points.** M5: 18 findings,
+6 real. T1-close: 14 confirmed of 28 candidates, 5 false allows. Both
+times roughly half of what survived verification was real, and both times
+the false allows clustered in the newest code written to prevent them.

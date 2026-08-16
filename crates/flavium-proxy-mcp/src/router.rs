@@ -223,6 +223,14 @@ pub enum SessionEnd {
         /// The contested name.
         tool: String,
     },
+    /// A re-list moved a *granted* tool to a different upstream, which
+    /// would have redirected that grant's authority to a server the
+    /// config never granted. The same contest reached in one step is
+    /// [`SessionEnd::ToolCollision`].
+    ToolRebound {
+        /// The name that moved.
+        tool: String,
+    },
     /// An internal invariant broke (a task died without reporting); a
     /// bug, surfaced as an abnormal end rather than a hang.
     Internal,
@@ -247,7 +255,11 @@ impl SessionEnd {
             SessionEnd::UpstreamGone { upstream } => SessionEndReason::UpstreamGone {
                 upstream: upstream_name(*upstream),
             },
-            SessionEnd::ToolCollision { tool } => {
+            // A rebind is a collision across time, so it reports as one
+            // rather than adding a variant to the verification target —
+            // the same reasoning as `TraceFailed` above. The log line and
+            // the exit path carry the distinction.
+            SessionEnd::ToolCollision { tool } | SessionEnd::ToolRebound { tool } => {
                 SessionEndReason::ToolCollision { tool: tool.clone() }
             }
             SessionEnd::Internal | SessionEnd::TraceFailed => SessionEndReason::Internal,
@@ -407,6 +419,7 @@ where
         relist_running: Vec::new(),
         relist_dirty: Vec::new(),
         pending_list_changed: false,
+        granted_routes: BTreeMap::new(),
         to_client,
         frames_to_upstream: 0,
         rejected: 0,
@@ -414,6 +427,9 @@ where
     };
     session.relist_running.resize(session.handles.len(), false);
     session.relist_dirty.resize(session.handles.len(), false);
+    // The bindings every later re-list is judged against.
+    let seeded = session.granted_route_snapshot(&session.toolset);
+    session.remember_granted_routes(seeded);
 
     let mut end = session.serve(client_rx, events_rx).await;
 
@@ -728,6 +744,13 @@ struct Session {
     /// A tool-table change happened before the client face reached
     /// Ready; one list_changed is flushed at the transition.
     pending_list_changed: bool,
+    /// Where each granted tool routed when it was first seen.
+    ///
+    /// A [`Grant`](flavium_core::Grant) names a tool, not an upstream, so
+    /// the binding between the two lives only in the tool table. Holding
+    /// it here is what lets a re-list that moves a granted name be
+    /// refused instead of silently redirecting the grant's authority.
+    granted_routes: BTreeMap<String, usize>,
     to_client: mpsc::Sender<Vec<u8>>,
     frames_to_upstream: u64,
     rejected: u64,
@@ -746,6 +769,54 @@ impl Session {
             return Ok(());
         };
         record_to(Some(enforcement), event(enforcement.principal()))
+    }
+
+    /// Which upstream each granted tool routes to in `set`.
+    fn granted_route_snapshot(&self, set: &ToolSet) -> BTreeMap<String, usize> {
+        let Some(enforcement) = self.enforcement.as_ref() else {
+            return BTreeMap::new();
+        };
+        // `i64::MIN` is the live-forever probe: expiry must not decide
+        // whether a binding is watched, or a grant could be rebound by
+        // waiting for it to lapse.
+        enforcement
+            .authorizer
+            .granted_tools(enforcement.principal(), Timestamp::from_unix_secs(i64::MIN))
+            .iter()
+            .filter_map(|tool| {
+                set.route(tool.as_str())
+                    .map(|upstream| (tool.as_str().to_owned(), upstream))
+            })
+            .collect()
+    }
+
+    /// Records where each granted tool routes, for names not already
+    /// recorded.
+    ///
+    /// First sighting wins. A tool a grant names may legitimately appear
+    /// late — an upstream that starts slowly, a `list_changed` that adds
+    /// it — and binding it then transfers no authority, because nothing
+    /// could have been called through it yet. Moving it afterwards is a
+    /// different act, and [`Session::rebound_granted_tool`] refuses it.
+    fn remember_granted_routes(&mut self, snapshot: BTreeMap<String, usize>) {
+        for (tool, upstream) in snapshot {
+            self.granted_routes.entry(tool).or_insert(upstream);
+        }
+    }
+
+    /// Would installing `set` move a granted tool to a different upstream?
+    ///
+    /// [`ToolSet::build`] refuses two upstreams offering one name at the
+    /// same instant, but a drop-then-claim across two re-lists reaches
+    /// the same end state one step at a time, and silently: the grant
+    /// still matches by name, so the call is allowed and forwarded to
+    /// whichever server now answers to it. This is that check across
+    /// time, and the session ends the way the simultaneous case does.
+    fn rebound_granted_tool(&self, set: &ToolSet) -> Option<String> {
+        self.granted_routes
+            .iter()
+            .find(|(tool, was)| set.route(tool).is_some_and(|now| now != **was))
+            .map(|(tool, _)| tool.clone())
     }
 
     /// The next correlation id for a `tools/call`.
@@ -1383,13 +1454,29 @@ impl Session {
             return (call, as_sent);
         };
         for (argument, flavor) in flavors {
-            if let Some(ArgValue::Str(value)) = call.args.get_mut(argument) {
-                let normalized = normalize::normalize(value, *flavor);
-                if normalized != *value {
-                    as_sent.insert(argument.clone(), std::mem::take(value));
-                }
-                *value = normalized;
+            let Some(slot) = call.args.get_mut(argument) else {
+                continue;
+            };
+            let ArgValue::Str(value) = slot else { continue };
+            if value.contains('\0') {
+                // A NUL cannot appear in a pathname on any platform
+                // flavium targets, so this value names no resource — but
+                // a consumer that stops at the NUL acts on the prefix
+                // before it. Normalizing would decide about the wrong
+                // string entirely: `/etc/passwd\0/../../data/x` reduces
+                // to `/data/x`, which a grant on `/data/` admits while
+                // such an upstream opens `/etc/passwd`. The value becomes
+                // the one no constraint ever admits, so the call is
+                // denied and the spelling still reaches the trace.
+                as_sent.insert(argument.clone(), std::mem::take(value));
+                *slot = ArgValue::Other;
+                continue;
             }
+            let normalized = normalize::normalize(value, *flavor);
+            if normalized != *value {
+                as_sent.insert(argument.clone(), std::mem::take(value));
+            }
+            *value = normalized;
         }
         (call, as_sent)
     }
@@ -1624,6 +1711,17 @@ impl Session {
                 }
                 match ToolSet::build(per_upstream) {
                     Ok(new_set) => {
+                        if let Some(tool) = self.rebound_granted_tool(&new_set) {
+                            warn!(
+                                %tool,
+                                upstream = %self.infos[upstream].name,
+                                "a re-list moved a granted tool to a different upstream; \
+                                 ending the session"
+                            );
+                            return Some(SessionEnd::ToolRebound { tool });
+                        }
+                        let seen = self.granted_route_snapshot(&new_set);
+                        self.remember_granted_routes(seen);
                         self.toolset = new_set;
                         info!(
                             upstream = %self.infos[upstream].name,

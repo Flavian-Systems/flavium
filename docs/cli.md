@@ -284,13 +284,34 @@ implementation-defined and flavium will not guess. Write the prefix the
 way the calls will be written: `windows-path-prefix = '\\server\share\'`
 for a share, `'D:\data\'` or `'\data\'` for a local directory.
 
-A path prefix that normalizes to **nothing** — `"."`, `"./"`, `""`,
-`"a/.."` — is a startup error, not an empty prefix. An empty prefix
-admits every string, so accepting one would silently turn "the working
-directory" into "the whole filesystem", which is the one direction this
-design says must never happen. Write the directory you mean. (`"/"` is
-different: an operator who writes the root has said what they meant, and
-it is accepted.)
+Under `windows-path-prefix` the root also keeps the **names** in it. A
+UNC root owns its server and share and a drive-rooted path owns its
+drive, so `..` clamps at both, exactly as Windows clamps it:
+`\\attacker\pub\..\..\fileserver\reports\x` stays on `attacker` instead
+of reading as a path on `fileserver`. `path-prefix` leaves a POSIX `//`
+root unpinned — there are no names in it to protect, and pinning some
+anyway would *admit* `//a/b/../../x` under a grant on `//a/b/`.
+
+Three prefix spellings are **startup errors** rather than compiled
+constraints, because for each of them a byte prefix would mean something
+much wider than what was written:
+
+| Spelling | Why it is refused |
+|---|---|
+| normalizes to nothing — `"."`, `"./"`, `""`, `"a/.."` | An empty prefix admits every string, silently turning "the working directory" into "the whole filesystem". |
+| the bare root — `"/"`, `'\'` | `"//host/share/x"` starts with `"/"`, so a grant on this machine's root would also admit a write to an arbitrary SMB host. No byte prefix separates the two roots. |
+| only ancestors — `".."`, `"../"`, `"../../"`, `'..\'` | Further `..` *stack* rather than cancel, so `"../../etc/passwd"` starts with `"../"` while sitting a level above what the prefix names. The grant would reach every ancestor. |
+
+Write the directory you mean. `"//"` on its own is still accepted: it
+admits exactly what it says, every `//`-rooted path, with no other root
+hiding inside it. A `..` that leads somewhere specific — `"../data/"` —
+is a real directory and compiles normally.
+
+A NUL byte in a path-flavored prefix is a startup error too, and a NUL in
+a path-flavored *argument* is denied at the gate rather than normalized:
+it cannot appear in a pathname on any supported platform, and a consumer
+that stops at it would act on the bytes before it while flavium compared
+the bytes after. The trace records the spelling that was sent.
 
 Why two keys instead of one that guesses: `\` is an ordinary filename
 byte on POSIX and *the* separator on Windows, so either fixed answer is a
@@ -329,8 +350,9 @@ Refused at startup, because a malformed file could mean anything:
   would be a lie);
 - zero or two constraint keys on one argument, or `absent = false`;
 - a `range` with neither bound;
-- a `path-prefix` / `windows-path-prefix` that normalizes to nothing
-  (above);
+- a `path-prefix` / `windows-path-prefix` that normalizes to nothing, to
+  a bare root, or to nothing but `..` segments, or that contains a NUL
+  (the table above says why each is wider than it looks);
 - a `principal` or `tool` that is empty or holds a control character;
 - an `expires` without a UTC offset (`2026-09-01T00:00:00` means a
   different instant in every time zone; write `…Z` or `…+02:00`), or one
