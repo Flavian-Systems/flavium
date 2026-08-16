@@ -18,10 +18,10 @@ is the source of truth for architecture; this file only fixes the words.
   is a server on one face and a client on the other.
 - **Proxy / middlebox** — flavium's position in the topology: an MCP
   *server* toward the client, an MCP *client* toward each upstream,
-  with every call crossing (and, from M4/M5 on, being authorized and
-  traced at) the seam in between. Since M2 the proxy **terminates** the
-  protocol — it answers `initialize` itself rather than relaying
-  another server's handshake.
+  with every call crossing — and, since M5, being authorized and traced
+  at — the seam in between. Since M2 the proxy **terminates** the
+  protocol: it answers `initialize` itself rather than relaying another
+  server's handshake.
 - **Upstream** — one tool server the proxy fronts: a spawned child
   process (stdio) or a streamable-HTTP endpoint. Named in config
   (`[[upstream]] name = "fs"`); the name appears in logs and errors
@@ -149,7 +149,23 @@ is the source of truth for architecture; this file only fixes the words.
   constraints + expiry (+ budget, T2). The unit of authority in flavium
   (`flavium_core::Grant`, M3); DESIGN's tuple (principal, tool,
   constraints, expiry, budget) is the envelope's principal × the grant.
-  Enforced from M4/M5 (Cedar-backed).
+  Cedar-backed and enforced on every call since M5.
+- **Grant file** — the operator-written `flavium.toml`: a `version`, a
+  `principal`, the `[[upstream]]` tables, and one `[[grant]]` table per
+  authority granted. It is the *only* language flavium asks anyone to
+  write — Cedar is an implementation detail of enforcing it. One
+  constraint key per argument, unknown keys refused, and a file with no
+  grants refuses to start (see *unenforced mode*). Everything in it is a
+  security decision written by hand, so every ambiguity is a startup
+  error rather than a mid-session denial that reads like policy.
+- **Unenforced mode** — `flavium proxy --unenforced`: the M1/M2
+  transparent middlebox, kept as an explicit choice. Every upstream tool
+  is exposed, every call forwarded, and **nothing is traced** — the
+  session's first trace event is the envelope in force, and recording an
+  empty one for a session that allowed everything would be a false
+  statement in the audit record. It exists so that "transparent" is
+  something an operator asked for, never something a missing config
+  section produced.
 - **Constraint** — the argument-level part of a grant, one per argument
   name (`flavium_core::Constraint`): `Prefix`, `Suffix`, `OneOf`,
   `Range` (inclusive `i64` bounds), and `Absent` (the argument must not
@@ -163,17 +179,32 @@ is the source of truth for architecture; this file only fixes the words.
   resolved, never escaping the root) *before* its constraint is checked,
   so the check is about the resource rather than the spelling. Opt-in per
   argument in the grant file (M5): only the path-flavored constraints
-  normalize, because normalizing a value that is not a path silently
-  changes what the decision was about. Without it, `Prefix("/data/")`
-  admits `/data/../etc/passwd` — a byte prefix match whose resource is
-  `/etc/passwd`. The decision uses the normalized value; the forwarded
-  frame keeps the client's original bytes.
+  (`path-prefix`, `windows-path-prefix`) normalize, because normalizing a
+  value that is not a path silently changes what the decision was about.
+  Without it, `Prefix("/data/")` admits `/data/../etc/passwd` — a byte
+  prefix match whose resource is `/etc/passwd`. The decision *and the
+  trace* use the normalized value; the forwarded frame keeps the client's
+  original bytes. Normalization must never *widen*: a prefix keeps a
+  trailing separator its author wrote (dropping it would make
+  `/data/invoices/` also admit `/data/invoices.bak`), a prefix that
+  reduces to nothing (`.`, `./`) is refused rather than compiled to the
+  everything-prefix, and a **leading** run of two or more separators is
+  preserved rather than collapsed — on Windows `\\host\share` is another
+  machine, and POSIX leaves a leading `//` implementation-defined. No case
+  folding, no filesystem access, no symlink resolution — those are outside
+  what a proxy can see.
 - **Path flavor** — which characters a path-flavored constraint treats as
   separators: POSIX (`/` only) or Windows (`/` and `\`). Declared per
   grant rather than guessed, because `\` is an ordinary filename byte on
   POSIX and *the* separator on Windows, so either fixed answer is a false
   allow on the other platform. A grant names one tool and a tool belongs
   to one upstream, so the grant is the scope at which the answer is known.
+- **UNC root** — a Windows path beginning `\\host\share`, naming a share
+  on another machine. Flavium keeps it distinct from a drive-rooted path
+  (`\data\…`, the current drive) rather than collapsing the separator
+  run, because a grant over a local directory that admitted the UNC
+  spelling of the same first segment would let an agent write to a remote
+  server — and hand that server the upstream's credentials.
 - **Grant envelope** — the union of an agent's grants: the precomputable
   worst case of what it can do (`flavium_core::GrantEnvelope`:
   principal + grants, in file order).
@@ -202,8 +233,25 @@ is the source of truth for architecture; this file only fixes the words.
   decision, denial, budget tick, spawn, and termination. The
   vocabulary is `flavium_core::TraceEvent` (M3; clock-free — a
   decision carries the `now` it used) behind the `TraceSink` trait;
-  T1 emits JSONL from the CLI (M5); the hash-chained SQLite recorder
-  with deterministic replay is T4.
+  since M5 the CLI emits JSONL to `--trace <file>`; the hash-chained
+  SQLite recorder with deterministic replay is T4.
+- **Trace record (JSONL line)** — one event as M5 writes it: the
+  recorder's four fields (`v`, a dense monotonic `seq`, a wall-clock
+  `ts`, a session id — everything the clock-free event deliberately
+  leaves out), then the event and its own fields. A decision records the
+  call **as evaluated** — normalized, with unmodelled values as a bare
+  type tag — because a record that disagreed with the decision it records
+  could not reproduce it. A string argument past 4 KiB (`PATH_MAX`, so a
+  path is never truncated) is cut and carries its full length and
+  SHA-256; below the cap nothing is hashed, since a short low-entropy
+  value is enumerable from its digest while the plaintext is already
+  there. The format is **unstable** until T4 publishes it as a spec.
+- **Sink failure** — a `TraceSink::record` that returns an error. The
+  session ends and the process exits non-zero: a full disk should stop
+  the agent, not run it unrecorded. It is the other half of `record`
+  being fallible at all, and the one failure that is *not* treated like
+  an engine failure — an engine that cannot evaluate denies the call and
+  the session continues, because authority held.
 - **Authorizer** — the seam the proxy asks "may this principal make this
   call now?" (`flavium_core::Authorizer`, M3): a trait with no I/O and
   no clock, so every answer is replayable. The runtime implementation is
@@ -214,9 +262,13 @@ is the source of truth for architecture; this file only fixes the words.
   the runtime engine is measured against (see *differential test*), not
   the engine itself. When the two disagree, the engine has the bug.
 - **Denial surface** — the pinned, client-visible shape of every
-  refusal. Notably: a tool outside the table answers `-32602` exactly
-  like a tool outside the grant envelope will (M5) — denial is
-  indistinguishable from nonexistence.
+  refusal. Notably: a tool outside the table answers `-32602` with
+  byte-identical bytes to a tool outside the grant envelope — denial is
+  indistinguishable from nonexistence, which is what makes the filtered
+  `tools/list` consistent rather than an oracle. Out-of-envelope
+  *arguments* on a granted tool get the other shape: a successful
+  response carrying `isError: true` and `denied by policy`, which the
+  agent can act on and which says nothing about the envelope.
 - **False allow** — flavium answered `Allow`, but the effect landed
   outside the grant. The security failure: it breaks the claim that an
   agent's worst case is the union of its grants. It arises wherever the

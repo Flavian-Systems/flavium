@@ -168,23 +168,39 @@ impl ToolSet {
         self.per_upstream.get(upstream).cloned().unwrap_or_default()
     }
 
-    /// The unpaginated merged `tools/list` result: every upstream's
-    /// tools in upstream order, each tool byte-identical to how its
-    /// upstream declared it, and no cursor — the proxy never mints one.
-    pub fn merged_result(&self) -> String {
+    /// Every tool name in the table, in upstream then declaration order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.per_upstream
+            .iter()
+            .flat_map(|tools| tools.iter().map(|tool| tool.name.as_str()))
+    }
+
+    /// The unpaginated merged `tools/list` result, restricted to the
+    /// tools `keep` admits, and how many those were.
+    ///
+    /// Every upstream's tools in upstream order, each tool byte-identical
+    /// to how its upstream declared it, and no cursor — the proxy never
+    /// mints one. The predicate is how M5's grant filter enters: a tool is
+    /// shown iff some live grant names it (visibility ⊆ authority), and
+    /// nothing about the tool object itself is rewritten, so the
+    /// `inputSchema` a client reads is still exactly its upstream's.
+    pub fn merged_result(&self, keep: impl Fn(&str) -> bool) -> (String, usize) {
         let mut out = String::from(r#"{"tools":["#);
-        let mut first = true;
+        let mut kept = 0usize;
         for tools in &self.per_upstream {
             for tool in tools {
-                if !first {
+                if !keep(&tool.name) {
+                    continue;
+                }
+                if kept > 0 {
                     out.push(',');
                 }
-                first = false;
+                kept += 1;
                 out.push_str(tool.raw.get());
             }
         }
         out.push_str("]}");
-        out
+        (out, kept)
     }
 }
 
@@ -269,9 +285,52 @@ mod tests {
         assert_eq!(set.route("missing"), None);
         assert_eq!(set.len(), 3);
         assert_eq!(
-            set.merged_result(),
-            r#"{"tools":[{"name":"read", "x": 1},{"name":"write"},{"name":"send",  "y": [2.50]}]}"#
+            set.names().collect::<Vec<_>>(),
+            vec!["read", "write", "send"]
         );
+        assert_eq!(
+            set.merged_result(|_| true),
+            (
+                r#"{"tools":[{"name":"read", "x": 1},{"name":"write"},{"name":"send",  "y": [2.50]}]}"#.to_owned(),
+                3
+            )
+        );
+    }
+
+    #[test]
+    fn the_filter_removes_tools_without_disturbing_the_rest() {
+        let set = ToolSet::build(vec![
+            vec![
+                entry("read", r#"{"name":"read", "x": 1}"#),
+                entry("write", r#"{"name":"write"}"#),
+            ],
+            vec![entry("send", r#"{"name":"send",  "y": [2.50]}"#)],
+        ])
+        .unwrap();
+
+        // Middle tool dropped: the surviving bytes and the separators
+        // are still exactly right.
+        assert_eq!(
+            set.merged_result(|name| name != "write"),
+            (
+                r#"{"tools":[{"name":"read", "x": 1},{"name":"send",  "y": [2.50]}]}"#.to_owned(),
+                2
+            )
+        );
+        // First tool dropped — the leading comma case.
+        assert_eq!(
+            set.merged_result(|name| name == "send"),
+            (r#"{"tools":[{"name":"send",  "y": [2.50]}]}"#.to_owned(), 1)
+        );
+        // Everything dropped: a legal, empty list, not an error.
+        assert_eq!(
+            set.merged_result(|_| false),
+            (r#"{"tools":[]}"#.to_owned(), 0)
+        );
+        // The table itself is untouched by filtering; routing still
+        // knows about tools the client was not shown.
+        assert_eq!(set.route("write"), Some(0));
+        assert_eq!(set.len(), 3);
     }
 
     #[test]
@@ -307,6 +366,10 @@ mod tests {
     fn empty_toolset_serves_an_empty_list() {
         let set = ToolSet::build(vec![vec![], vec![]]).unwrap();
         assert!(set.is_empty());
-        assert_eq!(set.merged_result(), r#"{"tools":[]}"#);
+        assert_eq!(set.names().count(), 0);
+        assert_eq!(
+            set.merged_result(|_| true),
+            (r#"{"tools":[]}"#.to_owned(), 0)
+        );
     }
 }

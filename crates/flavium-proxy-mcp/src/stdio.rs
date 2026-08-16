@@ -9,6 +9,7 @@
 use tracing::info;
 
 use crate::config::{self, TransportSpec, UpstreamSpec};
+use crate::enforcement::Enforcement;
 use crate::http::{HttpSetupError, HttpTransport};
 use crate::router::{self, PreparedUpstream, ProxyConfig, RunError, SessionSummary};
 use crate::transport::{SpawnError, StdioTransport, Transport};
@@ -48,13 +49,24 @@ pub enum ServeError {
 /// Serves one MCP session over this process's stdin/stdout, fronting
 /// every configured upstream. Returns when the session ends; spawned
 /// children are reaped and HTTP sessions terminated on the way out.
+///
+/// `enforcement` is the grant gate; `None` is `--unenforced`, the
+/// transparent middlebox that forwards everything and records nothing.
+/// See [`router::run`].
+///
+/// # Errors
+///
+/// [`ServeError`] when the upstream set is invalid, an upstream cannot be
+/// started, or the session fails to start.
 pub async fn serve(
     config: ProxyConfig,
     specs: &[UpstreamSpec],
+    enforcement: Option<Enforcement>,
 ) -> Result<SessionSummary, ServeError> {
     config::validate(specs)?;
     info!(
         upstreams = specs.len(),
+        enforced = enforcement.is_some(),
         "starting flavium MCP proxy (multi-upstream)"
     );
 
@@ -94,7 +106,14 @@ pub async fn serve(
         });
     }
 
-    let summary = router::run(config, prepared, tokio::io::stdin(), tokio::io::stdout()).await?;
+    let summary = router::run(
+        config,
+        prepared,
+        enforcement,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await?;
     Ok(summary)
 }
 

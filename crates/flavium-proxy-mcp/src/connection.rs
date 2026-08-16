@@ -23,6 +23,7 @@
 
 use std::time::Duration;
 
+use flavium_core::{CallId, CallOutcome, NotForwardedReason};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
@@ -48,6 +49,9 @@ pub enum Command {
         client_id: RequestId,
         /// The client id's exact bytes, restored on the response.
         client_id_raw: Box<str>,
+        /// The router's correlation id for this call, echoed back on the
+        /// response so it can be matched to the call it answers.
+        call_id: CallId,
         /// The full original client frame.
         frame: Vec<u8>,
     },
@@ -83,6 +87,16 @@ pub enum Event {
         upstream: usize,
         /// The client request this answers (for in-flight cleanup).
         client_id: RequestId,
+        /// Which call this answers. A client id can be reused as soon as
+        /// its call is cancelled or answered, so the id alone does not
+        /// identify a call; this does.
+        call_id: CallId,
+        /// How the call ended, as only the actor can know it: whether
+        /// the result carried `isError`, which error code the client
+        /// will see, or that the proxy substituted an answer because a
+        /// frame resisted unambiguous rewriting. The router records it
+        /// as the call's terminal trace event.
+        outcome: CallOutcome,
         /// The frame to deliver, byte-faithful except the id.
         frame: Vec<u8>,
     },
@@ -298,6 +312,32 @@ struct PeerInfoWire {
 struct ErrorWire {
     code: Option<i64>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IsErrorWire {
+    #[serde(default)]
+    is_error: Option<bool>,
+}
+
+/// How the client will see a response the actor is about to hand back —
+/// the one piece of a call's outcome the router cannot see for itself,
+/// since the frame crosses it opaquely.
+///
+/// A `result` without `isError`, or one that is not an object, counts as a
+/// successful result: MCP's flag is optional and absence means success.
+fn response_outcome(result: &Option<Box<RawValue>>, error: &Option<Box<RawValue>>) -> CallOutcome {
+    if let Some(error) = error {
+        let (code, _) = rpc_error_fields(error);
+        return CallOutcome::Error { code };
+    }
+    let is_error = result
+        .as_ref()
+        .and_then(|raw| serde_json::from_str::<IsErrorWire>(raw.get()).ok())
+        .and_then(|wire| wire.is_error)
+        .unwrap_or(false);
+    CallOutcome::Result { is_error }
 }
 
 fn rpc_error_fields(error_raw: &RawValue) -> (i64, String) {
@@ -621,11 +661,12 @@ impl Actor {
             Command::Forward {
                 client_id,
                 client_id_raw,
+                call_id,
                 frame,
             } => {
-                let upstream_id = self
-                    .pending
-                    .insert_client(client_id.clone(), &client_id_raw);
+                let upstream_id =
+                    self.pending
+                        .insert_client(client_id.clone(), &client_id_raw, call_id);
                 let rewritten = std::str::from_utf8(&frame)
                     .map_err(|_| ())
                     .and_then(|text| {
@@ -653,6 +694,8 @@ impl Actor {
                         self.emit(Event::Response {
                             upstream: self.upstream,
                             client_id,
+                            call_id,
+                            outcome: CallOutcome::NotForwarded(NotForwardedReason::Untranslatable),
                             frame: builder::error_frame(
                                 &client_id_raw,
                                 code::INVALID_REQUEST,
@@ -742,6 +785,7 @@ impl Actor {
                     Some(Pending::Client {
                         client_id,
                         client_id_raw,
+                        call_id,
                     }) => {
                         let restored =
                             std::str::from_utf8(&frame)
@@ -750,23 +794,30 @@ impl Actor {
                                     splice::rewrite_member(text, "id", &client_id_raw)
                                         .map_err(|_| ())
                                 });
-                        let frame = match restored {
-                            Ok(text) => text.into_bytes(),
+                        let (frame, outcome) = match restored {
+                            Ok(text) => (text.into_bytes(), response_outcome(&result, &error)),
                             Err(()) => {
                                 // The upstream's response resists
                                 // unambiguous rewriting; the client
                                 // still gets an answer, a typed one.
                                 warn!(upstream = %self.name, "upstream response resists id rewrite; substituting an error");
-                                builder::error_frame(
-                                    &client_id_raw,
-                                    code::INTERNAL_ERROR,
-                                    "upstream response could not be translated",
+                                (
+                                    builder::error_frame(
+                                        &client_id_raw,
+                                        code::INTERNAL_ERROR,
+                                        "upstream response could not be translated",
+                                    ),
+                                    CallOutcome::Error {
+                                        code: code::INTERNAL_ERROR,
+                                    },
                                 )
                             }
                         };
                         self.emit(Event::Response {
                             upstream: self.upstream,
                             client_id,
+                            call_id,
+                            outcome,
                             frame,
                         })
                         .await
@@ -935,6 +986,44 @@ mod tests {
         let tokenless =
             br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":0.5}}"#;
         assert_eq!(notification_progress_token(tokenless), None);
+    }
+
+    #[test]
+    fn response_outcomes_read_the_flag_the_client_will_see() {
+        let raw = |text: &str| -> Box<RawValue> { serde_json::from_str(text).unwrap() };
+
+        assert_eq!(
+            response_outcome(&Some(raw(r#"{"content": []}"#)), &None),
+            CallOutcome::Result { is_error: false }
+        );
+        assert_eq!(
+            response_outcome(&Some(raw(r#"{"content": [], "isError": true}"#)), &None),
+            CallOutcome::Result { is_error: true }
+        );
+        assert_eq!(
+            response_outcome(&Some(raw(r#"{"isError": false}"#)), &None),
+            CallOutcome::Result { is_error: false }
+        );
+        // A non-object result, or a non-boolean flag, is still a result.
+        assert_eq!(
+            response_outcome(&Some(raw("[]")), &None),
+            CallOutcome::Result { is_error: false }
+        );
+        assert_eq!(
+            response_outcome(&Some(raw(r#"{"isError": "yes"}"#)), &None),
+            CallOutcome::Result { is_error: false }
+        );
+        // An error answer reports the code the client receives.
+        assert_eq!(
+            response_outcome(&None, &Some(raw(r#"{"code": -32000, "message": "no"}"#))),
+            CallOutcome::Error { code: -32000 }
+        );
+        assert_eq!(
+            response_outcome(&None, &Some(raw(r#"{"nonsense": true}"#))),
+            CallOutcome::Error {
+                code: code::INTERNAL_ERROR
+            }
+        );
     }
 
     #[test]

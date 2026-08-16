@@ -4,15 +4,18 @@
 
 > A VM decides *where* the agent runs. Flavium decides *what it may do.*
 
-**Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written. What works today: a multi-upstream MCP proxy. `flavium` presents an MCP server to any stdio client (Claude Desktop, Claude Code, …) and fronts one or more upstream tool servers — local processes *and* streamable-HTTP endpoints — merging their tools into one list and routing every call by tool name, with `params`/`result` bodies crossing byte-faithfully. Enforcement — grants, budgets, tracing — lands in the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
+**Status: pre-v0.1 — under construction.** The [design document](DESIGN.md) is the current source of truth. Code lands here in the open as it is written.
+
+**What works today: an enforcing multi-upstream MCP proxy.** `flavium` presents an MCP server to any stdio client (Claude Desktop, Claude Code, …) and fronts one or more upstream tool servers — local processes *and* streamable-HTTP endpoints — merging their tools into one list and routing every call by tool name, with `params`/`result` bodies crossing byte-faithfully. On top of that, since T1/M5: the client is shown **only the tools your grant file names**, **every `tools/call` is authorized before it is forwarded** (argument prefixes and suffixes, value sets, numeric ranges, required-absent arguments, expiry — with path arguments normalized so `../` cannot walk out of a granted directory), and every decision, denial and refusal can be **recorded to a JSONL trace**. A config file with no grants refuses to start. Budgets (T2), attenuated delegation (T3) and the hash-chained recorder (T4) are the milestones behind it ([plan](docs/tasks/v0.1/T1-mcp-proxy-core.md)).
 
 ```bash
-flavium proxy -- npx -y @modelcontextprotocol/server-filesystem /data
+flavium proxy --config flavium.toml --trace flavium-trace.jsonl
 ```
 
-or, for several upstreams, `flavium proxy --config flavium.toml`:
-
 ```toml
+version = 1
+principal = "invoice-bot"
+
 [[upstream]]
 name = "fs"
 command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
@@ -21,9 +24,29 @@ command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"]
 name = "search"
 url = "https://example.com/mcp"
 headers = { Authorization = "Bearer …" }   # optional; values never logged
+
+[[grant]]                                  # read invoices, until September
+tool = "read_file"
+expires = 2026-09-01T00:00:00Z
+[grant.args]
+path = { path-prefix = "/data/invoices/" }
+
+[[grant]]                                  # mail colleagues, never blind-copy
+tool = "send_mail"
+[grant.args]
+to  = { suffix = "@yourco.com" }
+bcc = { absent = true }
 ```
 
-Flags, the full config-file reference, exit codes, startup errors, and client wiring are in [docs/cli.md](docs/cli.md).
+Anything the grants do not name is not in the tool list and not callable. An out-of-envelope call comes back as `denied by policy` — the agent can see it and retry inside its envelope, and learns nothing about what the envelope is.
+
+The transparent M1/M2 middlebox is still there when you want it, but you have to ask:
+
+```bash
+flavium proxy --unenforced -- npx -y @modelcontextprotocol/server-filesystem /data
+```
+
+Flags, the full config-file and grant reference, the trace format, exit codes, startup errors, and client wiring are in [docs/cli.md](docs/cli.md).
 
 ## Why
 

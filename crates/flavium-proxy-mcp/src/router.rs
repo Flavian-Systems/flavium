@@ -41,26 +41,39 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use flavium_core::{
+    ArgValue, CallId, CallOutcome, Decision, DenialReason, DiscardKind, NotForwardedReason,
+    Principal, RefusalReason, SessionEndReason, Timestamp, ToolCall, TraceEvent,
+};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
+use crate::args::{self, CallParams};
 use crate::builder::{self, code};
 use crate::config::ConfigError;
 use crate::connection::{
     self, CallError, Command, ConnectError, Event, Handle, SendRefusal, UpstreamInfo,
 };
+use crate::enforcement::Enforcement;
 use crate::envelope::{self, Message, RequestId};
 use crate::framing::{write_frame, FrameReadError, FrameReader, DEFAULT_MAX_FRAME_BYTES};
-use crate::idmap::ClientTable;
+use crate::idmap::{ClientTable, InFlight};
+use crate::normalize;
 use crate::protocol;
 use crate::splice;
 use crate::toolset::{
     ListPage, ListPageError, ToolEntry, ToolSet, MAX_LIST_PAGES, MAX_TOOLS_PER_UPSTREAM,
 };
 use crate::transport::Transport;
+
+/// What the client is told when a call is denied by policy.
+///
+/// Deliberately contentless: an agent learns that this call is outside its
+/// envelope, never what the envelope is.
+const DENIED_BY_POLICY: &str = "denied by policy";
 
 /// Client-bound frames queued before backpressure.
 const CLIENT_QUEUE_FRAMES: usize = 64;
@@ -212,6 +225,33 @@ pub enum SessionEnd {
     /// An internal invariant broke (a task died without reporting); a
     /// bug, surfaced as an abnormal end rather than a hang.
     Internal,
+    /// The trace sink refused an event, so the session stopped rather
+    /// than run unrecorded (**W3**). A full disk should stop the agent.
+    TraceFailed,
+}
+
+impl SessionEnd {
+    /// The same ending in the trace's vocabulary.
+    ///
+    /// [`SessionEnd::TraceFailed`] maps to
+    /// [`SessionEndReason::Internal`]: the trace gains nothing from a
+    /// variant describing the event a broken sink could not write, and
+    /// adding one would mean editing the verification target. The
+    /// operator learns the real reason from the exit code and the log.
+    fn reason(&self, upstream_name: impl Fn(usize) -> String) -> SessionEndReason {
+        match self {
+            SessionEnd::ClientEof => SessionEndReason::ClientEof,
+            SessionEnd::ClientReadError => SessionEndReason::ClientReadError,
+            SessionEnd::ClientWriteFailed => SessionEndReason::ClientWriteFailed,
+            SessionEnd::UpstreamGone { upstream } => SessionEndReason::UpstreamGone {
+                upstream: upstream_name(*upstream),
+            },
+            SessionEnd::ToolCollision { tool } => {
+                SessionEndReason::ToolCollision { tool: tool.clone() }
+            }
+            SessionEnd::Internal | SessionEnd::TraceFailed => SessionEndReason::Internal,
+        }
+    }
 }
 
 /// End-of-session accounting returned by [`run`].
@@ -272,11 +312,20 @@ enum Phase {
 /// Runs one proxied session: connects and lists every upstream, then
 /// serves the client until one side ends the session.
 ///
+/// `enforcement` is the grant gate. `Some(_)` is the enforced proxy: no
+/// call reaches an upstream without a [`Decision::Allow`] (**W1**), the
+/// tool list shows only granted tools (**W2**), and every decision,
+/// refusal and denial is a trace event. `None` is the deliberately
+/// unenforced middlebox behind `flavium proxy --unenforced`, which
+/// forwards every call and records nothing — an empty envelope in the
+/// audit record for a session that allowed everything would be a lie.
+///
 /// Transports are generic so tests can drive the router over in-memory
 /// pipes; production wiring lives in [`crate::stdio`].
 pub async fn run<CR, CW>(
     config: ProxyConfig,
     upstreams: Vec<PreparedUpstream>,
+    enforcement: Option<Enforcement>,
     client_rx: CR,
     client_tx: CW,
 ) -> Result<SessionSummary, RunError>
@@ -298,8 +347,45 @@ where
     info!(
         upstreams = infos.len(),
         tools = toolset.len(),
+        enforced = enforcement.is_some(),
         "all upstreams initialized; serving the client"
     );
+    if let Some(enforcement) = &enforcement {
+        // A grant for a tool nobody offers admits nothing, which is the
+        // safe direction — and almost always a typo. It is only knowable
+        // here, once every upstream has been listed.
+        let live_forever = enforcement
+            .authorizer
+            .granted_tools(enforcement.principal(), Timestamp::from_unix_secs(i64::MIN));
+        for tool in &live_forever {
+            if toolset.route(tool.as_str()).is_none() {
+                warn!(
+                    tool = %tool,
+                    "a grant names a tool no upstream offers; it can never allow anything"
+                );
+            }
+        }
+    }
+
+    // The session's first event is the policy in force, so every later
+    // `Allow { grant }` index can be interpreted against it.
+    if let Some(enforcement) = &enforcement {
+        let envelope = enforcement.envelope.clone();
+        if record_to(Some(enforcement), TraceEvent::SessionStarted { envelope }).is_err() {
+            shutdown_all(handles, actor_joins, config.shutdown_grace).await;
+            return Ok(SessionSummary {
+                handshake: ClientHandshake::default(),
+                upstreams: infos,
+                end: SessionEnd::TraceFailed,
+                client_delivery_failed: false,
+                frames_to_upstream: 0,
+                frames_to_client: 0,
+                frames_undelivered: 0,
+                client_frames_rejected: 0,
+                client_frames_discarded: 0,
+            });
+        }
+    }
 
     // Phase 3: serve.
     let counters = Arc::new(WriterCounters::default());
@@ -311,6 +397,8 @@ where
         handles,
         infos,
         toolset,
+        enforcement,
+        next_call_id: 0,
         phase: Phase::PreInit,
         handshake: ClientHandshake::default(),
         in_flight: ClientTable::default(),
@@ -326,7 +414,25 @@ where
     session.relist_running.resize(session.handles.len(), false);
     session.relist_dirty.resize(session.handles.len(), false);
 
-    let end = session.serve(client_rx, events_rx).await;
+    let mut end = session.serve(client_rx, events_rx).await;
+
+    // Calls still open when the session ends get their terminal event:
+    // every `CallDecided { Allow }` is answered by exactly one
+    // `CallCompleted`. Skipped when the sink is the reason we are here.
+    if end != SessionEnd::TraceFailed {
+        for call in session.in_flight.drain() {
+            debug!(tool = %call.tool, call_id = %call.call_id, "call abandoned at teardown");
+            let completed = session.record(|principal| TraceEvent::CallCompleted {
+                principal: principal.clone(),
+                call_id: call.call_id,
+                outcome: CallOutcome::Abandoned,
+            });
+            if completed.is_err() {
+                end = SessionEnd::TraceFailed;
+                break;
+            }
+        }
+    }
 
     // Teardown: ask every actor to close (children reaped, HTTP
     // sessions DELETEd), then give them — and the writer — the grace
@@ -368,6 +474,23 @@ where
         client_frames_rejected: session.rejected,
         client_frames_discarded: session.discarded,
     };
+
+    // The last event, once the writer has finished and `undelivered` is
+    // final. Best effort: the session is already over, so a sink that
+    // refuses this has nothing left to stop.
+    let ended = TraceEvent::SessionEnded {
+        reason: summary.end.reason(|index| {
+            summary
+                .upstreams
+                .get(index)
+                .map(|i| i.name.clone())
+                .unwrap_or_default()
+        }),
+        undelivered: summary.frames_undelivered,
+        delivery_failed: summary.client_delivery_failed,
+    };
+    let _ = record_to(session.enforcement.as_ref(), ended);
+
     info!(
         end = ?summary.end,
         delivery_failed = summary.client_delivery_failed,
@@ -566,11 +689,35 @@ struct RelistOutcome {
     result: Result<Vec<ToolEntry>, ListError>,
 }
 
+/// Records one event on the session's sink, if there is one.
+///
+/// `Err(())` means the sink refused it and the session must stop: a full
+/// disk should stop the agent, not run it unrecorded (**W3**). An
+/// unenforced session has no sink and nothing honest to write, so every
+/// call here is a no-op.
+fn record_to(enforcement: Option<&Enforcement>, event: TraceEvent) -> Result<(), ()> {
+    let Some(enforcement) = enforcement else {
+        return Ok(());
+    };
+    match enforcement.sink.record(&event) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            error!(error = %err, "trace sink failed; ending the session");
+            Err(())
+        }
+    }
+}
+
 struct Session {
     config: ProxyConfig,
     handles: Vec<Handle>,
     infos: Vec<UpstreamInfo>,
     toolset: ToolSet,
+    /// The grant gate, or `None` for an explicitly unenforced session.
+    enforcement: Option<Enforcement>,
+    /// Mints [`CallId`]s: one per `tools/call` that produces a trace
+    /// event, monotonic within the session.
+    next_call_id: u64,
     phase: Phase,
     handshake: ClientHandshake,
     in_flight: ClientTable,
@@ -587,6 +734,41 @@ struct Session {
 }
 
 impl Session {
+    /// Records one event, building it only when there is a sink to take
+    /// it. `Err(())` means the session must end with
+    /// [`SessionEnd::TraceFailed`].
+    ///
+    /// The closure receives the principal so that the many events naming
+    /// one do not each have to reach into the enforcement bundle.
+    fn record(&self, event: impl FnOnce(&Principal) -> TraceEvent) -> Result<(), ()> {
+        let Some(enforcement) = &self.enforcement else {
+            return Ok(());
+        };
+        record_to(Some(enforcement), event(enforcement.principal()))
+    }
+
+    /// The next correlation id for a `tools/call`.
+    fn mint_call_id(&mut self) -> CallId {
+        let id = self.next_call_id;
+        self.next_call_id = self.next_call_id.wrapping_add(1);
+        CallId(id)
+    }
+
+    /// Records a frame the router consumed without forwarding or
+    /// answering. Returns what the caller must return: `Some(end)` only
+    /// when the sink failed.
+    ///
+    /// The two [`DiscardKind`]s an upstream *connection* owns
+    /// (`UnknownResponseId`, `OutOfScopeProgress`) never come here: only
+    /// the serve loop traces, so that events keep causal order without a
+    /// lock, and those two stay unrecorded in T1.
+    fn discard(&self, kind: DiscardKind) -> Option<SessionEnd> {
+        match self.record(|_| TraceEvent::FrameDiscarded { kind }) {
+            Ok(()) => None,
+            Err(()) => Some(SessionEnd::TraceFailed),
+        }
+    }
+
     /// The serve loop; returns why the session ended.
     async fn serve<CR>(&mut self, client_rx: CR, mut events: mpsc::Receiver<Event>) -> SessionEnd
     where
@@ -605,6 +787,12 @@ impl Session {
                     Err(FrameReadError::Oversized { limit }) => {
                         self.rejected += 1;
                         warn!(limit, "rejecting oversized client frame");
+                        if self
+                            .record(|_| TraceEvent::FrameRejected { code: code::PARSE_ERROR })
+                            .is_err()
+                        {
+                            return SessionEnd::TraceFailed;
+                        }
                         if !self
                             .deliver(builder::error_frame_null_id(code::PARSE_ERROR, "Parse error"))
                             .await
@@ -659,6 +847,9 @@ impl Session {
                 } else {
                     (code::INVALID_REQUEST, "Invalid Request")
                 };
+                if self.record(|_| TraceEvent::FrameRejected { code }).is_err() {
+                    return Some(SessionEnd::TraceFailed);
+                }
                 if !self
                     .deliver(builder::error_frame_null_id(code, message))
                     .await
@@ -682,7 +873,7 @@ impl Session {
                 // is nothing a client response can answer.
                 self.discarded += 1;
                 debug!("discarding unsolicited response from client");
-                None
+                self.discard(DiscardKind::StrayResponse)
             }
         }
     }
@@ -697,7 +888,12 @@ impl Session {
     ) -> Option<SessionEnd> {
         let reply = match (self.phase, method.as_str()) {
             (_, "ping") => builder::result_frame(&id_raw, "{}"),
-            (Phase::PreInit, "initialize") => self.on_initialize(&id_raw, params.as_deref()),
+            (Phase::PreInit, "initialize") => {
+                match self.on_initialize(&id_raw, params.as_deref()) {
+                    Ok(reply) => reply,
+                    Err(end) => return Some(end),
+                }
+            }
             (_, "initialize") => {
                 builder::error_frame(&id_raw, code::INVALID_REQUEST, "Already initialized")
             }
@@ -706,7 +902,10 @@ impl Session {
                 code::SERVER_NOT_INITIALIZED,
                 "Server not initialized",
             ),
-            (Phase::Ready, "tools/list") => self.on_tools_list(&id_raw, params.as_deref()),
+            (Phase::Ready, "tools/list") => match self.on_tools_list(&id_raw, params.as_deref()) {
+                Ok(reply) => reply,
+                Err(end) => return Some(end),
+            },
             (Phase::Ready, "tools/call") => {
                 return self
                     .on_tools_call(frame, id, id_raw, params.as_deref())
@@ -723,7 +922,7 @@ impl Session {
         None
     }
 
-    fn on_initialize(&mut self, id_raw: &str, params: Option<&str>) -> Vec<u8> {
+    fn on_initialize(&mut self, id_raw: &str, params: Option<&str>) -> Result<Vec<u8>, SessionEnd> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct InitParamsWire {
@@ -738,14 +937,18 @@ impl Session {
 
         let parsed: Option<InitParamsWire> = params.and_then(|p| serde_json::from_str(p).ok());
         let Some(parsed) = parsed else {
-            return builder::error_frame(id_raw, code::INVALID_PARAMS, "Invalid params");
+            return Ok(builder::error_frame(
+                id_raw,
+                code::INVALID_PARAMS,
+                "Invalid params",
+            ));
         };
         let Some(offered) = parsed.protocol_version else {
-            return builder::error_frame(
+            return Ok(builder::error_frame(
                 id_raw,
                 code::INVALID_PARAMS,
                 "protocolVersion is required",
-            );
+            ));
         };
 
         // Spec negotiation: echo a supported offer; otherwise answer
@@ -770,6 +973,23 @@ impl Session {
             client_version = self.handshake.client_version.as_deref(),
             "answered client initialize"
         );
+        // Recorded where the negotiation finished, before the answer is
+        // queued: the client's self-reported name and version are
+        // untrusted, informational, never identity — kept so protocol
+        // drift is observable in the audit record.
+        let recorded = self.record(|_| TraceEvent::HandshakeCompleted {
+            offered_protocol_version: self
+                .handshake
+                .offered_protocol_version
+                .clone()
+                .unwrap_or_default(),
+            protocol_version: negotiated.clone(),
+            client_name: self.handshake.client_name.clone(),
+            client_version: self.handshake.client_version.clone(),
+        });
+        if recorded.is_err() {
+            return Err(SessionEnd::TraceFailed);
+        }
 
         let mut result = serde_json::json!({
             "protocolVersion": negotiated,
@@ -788,10 +1008,23 @@ impl Session {
             result["instructions"] = serde_json::Value::String(instructions);
         }
         self.phase = Phase::Initializing;
-        builder::result_frame(id_raw, &result.to_string())
+        Ok(builder::result_frame(id_raw, &result.to_string()))
     }
 
-    fn on_tools_list(&mut self, id_raw: &str, params: Option<&str>) -> Vec<u8> {
+    /// `tools/list`, filtered to the tool axis and nothing finer.
+    ///
+    /// A tool is shown iff some live grant names it (**W2**). Constraints
+    /// do not filter: whether a call is inside the envelope depends on
+    /// arguments that do not exist yet at list time, so filtering finer
+    /// could only ever be a guess — and rewriting each tool's
+    /// `inputSchema` to advertise the constraints would both edit bytes
+    /// **I1** promises to forward and leak the grant file to whatever
+    /// reads the list.
+    ///
+    /// This is core's **INV-3** made visible: an expired grant makes its
+    /// tool vanish from the list *and* makes its calls answer `-32602`,
+    /// one fact with two faces.
+    fn on_tools_list(&self, id_raw: &str, params: Option<&str>) -> Result<Vec<u8>, SessionEnd> {
         // The proxy returns unpaginated lists and never mints a cursor,
         // so any non-null cursor is foreign by definition. A `null`
         // params member is treated as absent params.
@@ -800,32 +1033,98 @@ impl Session {
                 Ok(None) => {}
                 Ok(Some(value)) if value == "null" => {}
                 Ok(Some(_)) => {
-                    return builder::error_frame(id_raw, code::INVALID_PARAMS, "Unknown cursor")
+                    return Ok(builder::error_frame(
+                        id_raw,
+                        code::INVALID_PARAMS,
+                        "Unknown cursor",
+                    ))
                 }
                 Err(_) => {
-                    return builder::error_frame(id_raw, code::INVALID_PARAMS, "Invalid params")
+                    return Ok(builder::error_frame(
+                        id_raw,
+                        code::INVALID_PARAMS,
+                        "Invalid params",
+                    ))
                 }
             }
         }
-        let merged = self.toolset.merged_result();
+
+        // `listed` is `Some` exactly when the session is enforced; it
+        // carries what the trace event will say, once the reply is known
+        // to be serveable.
+        let (merged, listed) = match &self.enforcement {
+            None => (self.toolset.merged_result(|_| true).0, None),
+            Some(enforcement) => {
+                let now = enforcement.clock.now();
+                let live = enforcement
+                    .authorizer
+                    .granted_tools(enforcement.principal(), now);
+                // `BTreeSet<ToolName>::contains(&str)` goes through
+                // `Borrow<str>`, so the filter allocates nothing per tool.
+                let (merged, granted) = self.toolset.merged_result(|name| live.contains(name));
+                (merged, Some((granted as u64, now)))
+            }
+        };
+
         // Per-upstream byte budgets bound each upstream at one frame's
         // worth, but several upstreams can still sum past what one
         // frame may carry; refuse rather than emit a frame the proxy
-        // itself would reject on any read path.
+        // itself would reject on any read path. Checked after filtering
+        // (which can only shrink the list) but *before* the trace event,
+        // so `ToolsListed` never claims tools the client was not shown.
         if merged.len().saturating_add(64) > self.config.max_frame_bytes {
             warn!(
                 bytes = merged.len(),
                 "merged tool list exceeds the frame cap; refusing to serve it"
             );
-            return builder::error_frame(
+            return Ok(builder::error_frame(
                 id_raw,
                 code::INTERNAL_ERROR,
                 "merged tool list exceeds the frame limit",
-            );
+            ));
         }
-        builder::result_frame(id_raw, &merged)
+
+        if let Some((granted, now)) = listed {
+            let offered = self.toolset.len() as u64;
+            debug!(offered, granted, %now, "filtered the tool list");
+            if self
+                .record(|principal| TraceEvent::ToolsListed {
+                    principal: principal.clone(),
+                    now,
+                    offered,
+                    granted,
+                })
+                .is_err()
+            {
+                return Err(SessionEnd::TraceFailed);
+            }
+        }
+        Ok(builder::result_frame(id_raw, &merged))
     }
 
+    /// The gate: read the params, route, claim the id, decide, then
+    /// forward. Each step has one client-visible answer and one trace
+    /// event, and the order is forced by what each step needs.
+    ///
+    /// **Routing first**, because a granted tool no upstream serves must
+    /// not produce an `Allow` for a call that then cannot happen — a
+    /// trace saying a tool was used when it was not. **Claiming the id
+    /// before deciding**, so a duplicate id can never produce an `Allow`
+    /// followed by a refusal for the same [`CallId`]: one call, one
+    /// terminal event. **Deciding last**, so the denial is the last word
+    /// — which is what makes **W1** readable here: the only path to
+    /// [`Command::Forward`] under enforcement runs through
+    /// [`Decision::Allow`].
+    ///
+    /// The two client-visible shapes are the T1 denial surface.
+    /// `NotGranted` and `Expired` are byte-identical to a tool that does
+    /// not exist, which is what makes the filtered `tools/list`
+    /// consistent rather than a hint (**W6**); `OutOfEnvelope` is an
+    /// agent-visible, recoverable error result, because the agent did
+    /// name a tool it holds and can try again inside the envelope.
+    /// `EvaluationError` gets that same shape — the client learns
+    /// nothing about engine internals, and the detail goes to the trace
+    /// and the log, where an operator will see it.
     async fn on_tools_call(
         &mut self,
         frame: Vec<u8>,
@@ -833,52 +1132,113 @@ impl Session {
         id_raw: String,
         params: Option<&str>,
     ) -> Option<SessionEnd> {
-        #[derive(Deserialize)]
-        struct CallParamsWire {
-            name: Option<String>,
-        }
+        let call_id = self.mint_call_id();
 
-        let name = params
-            .and_then(|p| serde_json::from_str::<CallParamsWire>(p).ok())
-            .and_then(|p| p.name);
-        let Some(name) = name else {
-            let reply = builder::error_frame(&id_raw, code::INVALID_PARAMS, "Invalid params");
-            if !self.deliver(reply).await {
-                return Some(SessionEnd::ClientWriteFailed);
+        // 1. Read the params. An ambiguous or ill-shaped `tools/call` is
+        //    refused before anything else looks at it.
+        let parsed = match args::parse_call_params(params) {
+            Ok(parsed) => parsed,
+            Err(malformed) => {
+                warn!(detail = malformed.detail, "refusing malformed tools/call");
+                return self
+                    .refuse_call(
+                        call_id,
+                        malformed.tool,
+                        RefusalReason::MalformedParams,
+                        builder::error_frame(&id_raw, code::INVALID_PARAMS, "Invalid params"),
+                    )
+                    .await;
             }
-            return None;
         };
 
-        let Some(upstream) = self.toolset.route(&name) else {
-            // Indistinguishable from what M5 will answer for a tool
-            // outside the grant envelope.
-            let reply = builder::error_frame(
-                &id_raw,
-                code::INVALID_PARAMS,
-                format!("Unknown tool: {name}").as_str(),
-            );
-            if !self.deliver(reply).await {
-                return Some(SessionEnd::ClientWriteFailed);
-            }
-            return None;
-        };
-
-        if self.in_flight.insert(id.clone(), upstream).is_err() {
+        // 2. Refuse a reused id *before* the tool table is consulted.
+        //    Otherwise the two refusals differ by code — `-32600` for a
+        //    name the upstreams offer, `-32602` for one they do not —
+        //    and that difference is an oracle for exactly the set the
+        //    filtered `tools/list` exists to hide (**W6**). D5 only
+        //    requires the claim to precede `authorize`, not to follow
+        //    `route`.
+        if self.in_flight.contains(&id) {
             warn!("client reused an in-flight request id; rejecting");
             let reply = builder::error_frame(
                 &id_raw,
                 code::INVALID_REQUEST,
                 "Request id is already in flight",
             );
+            return self
+                .refuse_call(
+                    call_id,
+                    Some(parsed.name),
+                    RefusalReason::DuplicateRequestId,
+                    reply,
+                )
+                .await;
+        }
+
+        // 3. Route. A name no upstream offers is `-32602`, the same
+        //    bytes a denied tool gets.
+        let Some(upstream) = self.toolset.route(&parsed.name) else {
+            let reply = unknown_tool_frame(&id_raw, &parsed.name);
+            return self
+                .refuse_call(
+                    call_id,
+                    Some(parsed.name),
+                    RefusalReason::UnknownTool,
+                    reply,
+                )
+                .await;
+        };
+
+        // 4. Claim the id, before any decision is made about the call, so
+        //    a reused id can never produce an `Allow` and then a refusal
+        //    for the same `CallId`. Step 2 already refused every
+        //    duplicate, so this cannot fail; it is written as a `Result`
+        //    anyway because a silent overwrite here would orphan an
+        //    in-flight call.
+        let claim = self.in_flight.insert(
+            id.clone(),
+            InFlight {
+                upstream,
+                tool: parsed.name.clone(),
+                call_id,
+            },
+        );
+        if claim.is_err() {
+            warn!("client reused an in-flight request id; rejecting");
+            let reply = builder::error_frame(
+                &id_raw,
+                code::INVALID_REQUEST,
+                "Request id is already in flight",
+            );
+            return self
+                .refuse_call(
+                    call_id,
+                    Some(parsed.name),
+                    RefusalReason::DuplicateRequestId,
+                    reply,
+                )
+                .await;
+        }
+
+        // 5. Decide.
+        if let Some(reply) = self.decide_call(call_id, &parsed, &id_raw) {
+            let reply = match reply {
+                Ok(reply) => reply,
+                Err(end) => return Some(end),
+            };
+            self.in_flight.remove(&id);
             if !self.deliver(reply).await {
                 return Some(SessionEnd::ClientWriteFailed);
             }
             return None;
         }
 
+        // 6. Forward the client's own bytes — normalization changed the
+        //    decision, never the frame (**W5**).
         let command = Command::Forward {
             client_id: id.clone(),
             client_id_raw: id_raw.clone().into_boxed_str(),
+            call_id,
             frame,
         };
         // try_send, never send: the serve loop must not park on a full
@@ -891,12 +1251,28 @@ impl Session {
             }
             Err(refusal) => {
                 self.in_flight.remove(&id);
-                let message = match refusal {
-                    SendRefusal::Busy => "upstream busy",
+                let (message, reason) = match refusal {
+                    SendRefusal::Busy => ("upstream busy", NotForwardedReason::UpstreamBusy),
                     // The actor is gone; its Fatal/Ended event will end
                     // the session. Answer this call meanwhile.
-                    SendRefusal::Closed => "upstream unavailable",
+                    SendRefusal::Closed => (
+                        "upstream unavailable",
+                        NotForwardedReason::UpstreamUnavailable,
+                    ),
                 };
+                warn!(tool = %parsed.name, %call_id, message, "allowed call was not forwarded");
+                // The call was allowed, so it needs its terminal event
+                // even though it never reached an upstream.
+                if self
+                    .record(|principal| TraceEvent::CallCompleted {
+                        principal: principal.clone(),
+                        call_id,
+                        outcome: CallOutcome::NotForwarded(reason),
+                    })
+                    .is_err()
+                {
+                    return Some(SessionEnd::TraceFailed);
+                }
                 let reply = builder::error_frame(&id_raw, code::INTERNAL_ERROR, message);
                 if !self.deliver(reply).await {
                     return Some(SessionEnd::ClientWriteFailed);
@@ -904,6 +1280,108 @@ impl Session {
                 None
             }
         }
+    }
+
+    /// Records a protocol-level refusal and answers it. `Some(end)` only
+    /// when the sink or the client write path failed.
+    async fn refuse_call(
+        &mut self,
+        call_id: CallId,
+        tool: Option<String>,
+        reason: RefusalReason,
+        reply: Vec<u8>,
+    ) -> Option<SessionEnd> {
+        let recorded = self.record(|principal| TraceEvent::CallRefused {
+            principal: principal.clone(),
+            call_id,
+            tool: tool.clone(),
+            reason,
+        });
+        if recorded.is_err() {
+            return Some(SessionEnd::TraceFailed);
+        }
+        if !self.deliver(reply).await {
+            return Some(SessionEnd::ClientWriteFailed);
+        }
+        None
+    }
+
+    /// Authorizes one routed call.
+    ///
+    /// `None` means allowed — forward it. `Some(Ok(frame))` is the denial
+    /// to answer with; `Some(Err(end))` means the sink refused the
+    /// decision event, so nothing may proceed. An unenforced session
+    /// decides nothing and always returns `None`.
+    fn decide_call(
+        &self,
+        call_id: CallId,
+        parsed: &CallParams,
+        id_raw: &str,
+    ) -> Option<Result<Vec<u8>, SessionEnd>> {
+        let enforcement = self.enforcement.as_ref()?;
+        // One clock read, used for the decision and for the event that
+        // records it, so replaying that event reproduces the decision.
+        let now = enforcement.clock.now();
+        let call = self.evaluated_call(parsed);
+        let decision = enforcement
+            .authorizer
+            .authorize(enforcement.principal(), &call, now);
+
+        match &decision {
+            Decision::Allow { grant } => {
+                debug!(tool = %call.tool, %call_id, grant, %now, "call allowed")
+            }
+            Decision::Deny(reason) => {
+                warn!(tool = %call.tool, %call_id, %now, %reason, "call denied")
+            }
+        }
+        let recorded = self.record(|principal| TraceEvent::CallDecided {
+            principal: principal.clone(),
+            call_id,
+            call,
+            now,
+            decision: decision.clone(),
+        });
+        if recorded.is_err() {
+            return Some(Err(SessionEnd::TraceFailed));
+        }
+
+        match decision {
+            Decision::Allow { .. } => None,
+            // An expired grant is no grant: indistinguishable from a
+            // tool that was never there.
+            Decision::Deny(DenialReason::NotGranted | DenialReason::Expired) => {
+                Some(Ok(unknown_tool_frame(id_raw, &parsed.name)))
+            }
+            Decision::Deny(DenialReason::OutOfEnvelope | DenialReason::EvaluationError { .. }) => {
+                Some(Ok(builder::result_frame(id_raw, &denied_result())))
+            }
+        }
+    }
+
+    /// The call as the core will judge it: the client's arguments, with
+    /// the arguments this grant file marks as paths normalized (D4).
+    ///
+    /// The normalized form is what the decision is made on *and* what the
+    /// trace records, so the record reproduces the decision. The frame
+    /// forwarded upstream is untouched.
+    fn evaluated_call(&self, parsed: &CallParams) -> ToolCall {
+        let mut call = ToolCall {
+            tool: parsed.name.clone(),
+            args: parsed.args.clone(),
+        };
+        let Some(enforcement) = self.enforcement.as_ref() else {
+            return call;
+        };
+        let Some(flavors) = enforcement.path_flavors.for_tool(&parsed.name) else {
+            return call;
+        };
+        for (argument, flavor) in flavors {
+            if let Some(ArgValue::Str(value)) = call.args.get_mut(argument) {
+                *value = normalize::normalize(value, *flavor);
+            }
+        }
+        call
     }
 
     async fn on_client_notification(
@@ -935,13 +1413,26 @@ impl Session {
                 let Some(request_id) = request_id else {
                     self.discarded += 1;
                     debug!("cancellation without a readable requestId; dropped");
-                    return None;
+                    return self.discard(DiscardKind::CancelUnreadable);
                 };
-                let Some(upstream) = self.in_flight.remove(&request_id) else {
+                let Some(call) = self.in_flight.remove(&request_id) else {
                     self.discarded += 1;
                     debug!("cancellation for a request not in flight; dropped");
-                    return None;
+                    return self.discard(DiscardKind::CancelNotInFlight);
                 };
+                // The call was allowed and is now over, whatever the
+                // upstream does with the cancellation.
+                let call_id = call.call_id;
+                if self
+                    .record(|principal| TraceEvent::CallCompleted {
+                        principal: principal.clone(),
+                        call_id,
+                        outcome: CallOutcome::Cancelled,
+                    })
+                    .is_err()
+                {
+                    return Some(SessionEnd::TraceFailed);
+                }
                 let command = Command::Cancel {
                     client_id: request_id,
                     frame,
@@ -950,11 +1441,12 @@ impl Session {
                 // actor's queue is full the cancel is dropped, and the
                 // in-flight entry is already removed, so the eventual
                 // response is dropped by the route check instead.
-                match self.handles[upstream].try_send(command) {
+                match self.handles[call.upstream].try_send(command) {
                     Ok(()) => self.frames_to_upstream += 1,
                     Err(refusal) => {
                         self.discarded += 1;
-                        debug!(?refusal, "cancellation not forwarded");
+                        debug!(?refusal, tool = %call.tool, "cancellation not forwarded");
+                        return self.discard(DiscardKind::CancelNotForwarded);
                     }
                 }
                 None
@@ -965,7 +1457,7 @@ impl Session {
                 // not model; they stop here, visibly in the count.
                 self.discarded += 1;
                 debug!(method = other, "discarding unroutable client notification");
-                None
+                self.discard(DiscardKind::UnroutableNotification)
             }
         }
     }
@@ -975,36 +1467,53 @@ impl Session {
             Event::Response {
                 upstream,
                 client_id,
+                call_id,
+                outcome,
                 frame,
             } => {
-                // The response must answer a request that is (a) still
-                // in flight and (b) routed to the upstream it came
-                // from. (a) fails for responses that raced a
-                // cancellation — the plan's "late responses after
-                // cancel dropped"; (b) fails when the client has since
-                // reused the id toward a different upstream, which a
-                // stale response must not hijack.
-                match self.in_flight.route(&client_id) {
-                    Some(routed) if routed == upstream => {
-                        self.in_flight.remove(&client_id);
-                        if !self.deliver(frame).await {
-                            return Some(SessionEnd::ClientWriteFailed);
-                        }
-                    }
-                    Some(_) => {
-                        self.discarded += 1;
-                        debug!(
-                            upstream,
-                            "stale response from a different upstream; dropped"
-                        );
-                    }
-                    None => {
-                        self.discarded += 1;
-                        debug!(
-                            upstream,
-                            "response for a request no longer in flight; dropped"
-                        );
-                    }
+                // The response must answer a call that is (a) still in
+                // flight, (b) routed to the upstream it came from, and
+                // (c) *the same call* — not merely the same client id.
+                //
+                // (a) fails for responses that raced a cancellation —
+                // the plan's "late responses after cancel dropped". (b)
+                // fails when the client has since reused the id toward a
+                // different upstream. (c) is what (b) alone misses: a
+                // client may legitimately reuse an id once its call is
+                // cancelled, and if the new call goes to the *same*
+                // upstream, the queued response of the old one would
+                // otherwise be delivered under the new call's id and,
+                // worse, recorded as the new call's outcome. A trace
+                // that names the wrong call is a false statement in the
+                // one artifact that exists to answer "what did this
+                // agent actually do?".
+                let matched = self
+                    .in_flight
+                    .route(&client_id)
+                    .is_some_and(|call| call.upstream == upstream && call.call_id == call_id);
+                if !matched {
+                    self.discarded += 1;
+                    debug!(
+                        upstream,
+                        %call_id,
+                        "response for a call no longer in flight here; dropped"
+                    );
+                    return self.discard(DiscardKind::StaleResponse);
+                }
+                self.in_flight.remove(&client_id);
+                debug!(upstream, %call_id, ?outcome, "call completed");
+                if self
+                    .record(|principal| TraceEvent::CallCompleted {
+                        principal: principal.clone(),
+                        call_id,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    return Some(SessionEnd::TraceFailed);
+                }
+                if !self.deliver(frame).await {
+                    return Some(SessionEnd::ClientWriteFailed);
                 }
                 None
             }
@@ -1016,7 +1525,7 @@ impl Session {
                 if self.phase != Phase::Ready {
                     self.discarded += 1;
                     debug!("upstream notification before client is ready; dropped");
-                    return None;
+                    return self.discard(DiscardKind::NotificationBeforeReady);
                 }
                 if !self.deliver(frame).await {
                     return Some(SessionEnd::ClientWriteFailed);
@@ -1032,6 +1541,16 @@ impl Session {
                     upstream = %self.infos[upstream].name,
                     "upstream ended; ending the session (supervision is T3)"
                 );
+                let name = self.infos[upstream].name.clone();
+                if self
+                    .record(|_| TraceEvent::UpstreamEnded {
+                        upstream: name,
+                        error: None,
+                    })
+                    .is_err()
+                {
+                    return Some(SessionEnd::TraceFailed);
+                }
                 Some(SessionEnd::UpstreamGone { upstream })
             }
             Event::Fatal { upstream, error } => {
@@ -1040,6 +1559,19 @@ impl Session {
                     error = %error,
                     "upstream failed; ending the session"
                 );
+                // `TransportError`'s Display is already redaction-safe:
+                // URLs and header values never reach it.
+                let name = self.infos[upstream].name.clone();
+                let error = error.to_string();
+                if self
+                    .record(|_| TraceEvent::UpstreamEnded {
+                        upstream: name,
+                        error: Some(error),
+                    })
+                    .is_err()
+                {
+                    return Some(SessionEnd::TraceFailed);
+                }
                 Some(SessionEnd::UpstreamGone { upstream })
             }
         }
@@ -1140,6 +1672,30 @@ impl Session {
     async fn deliver(&mut self, frame: Vec<u8>) -> bool {
         self.to_client.send(frame).await.is_ok()
     }
+}
+
+/// The one answer for "that tool is not available to you", whether no
+/// upstream offers it or no live grant names it.
+///
+/// The two must stay byte-identical (**W6**): a denial that were
+/// distinguishable from absence would turn the filtered `tools/list` into
+/// an oracle for the grant file.
+fn unknown_tool_frame(id_raw: &str, tool: &str) -> Vec<u8> {
+    builder::error_frame(
+        id_raw,
+        code::INVALID_PARAMS,
+        format!("Unknown tool: {tool}").as_str(),
+    )
+}
+
+/// The `tools/call` result a policy denial produces: a successful
+/// JSON-RPC response carrying a tool error, which is how MCP says "the
+/// tool refused" as opposed to "the request was malformed".
+///
+/// It is deliberately contentless. An agent that named a tool it holds
+/// can retry inside its envelope; it is never told what the envelope is.
+fn denied_result() -> String {
+    format!(r#"{{"content":[{{"type":"text","text":"{DENIED_BY_POLICY}"}}],"isError":true}}"#)
 }
 
 /// The exact id bytes of a request frame, falling back to canonical
