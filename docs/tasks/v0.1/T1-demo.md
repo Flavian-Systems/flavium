@@ -84,14 +84,15 @@ predate the flag and are left as they were run.
       and check that both servers' tools appear in one merged list, that
       a call to each routes to the right server, and that a deliberate
       tool-name collision is refused. Worked example below.
-- [ ] *(M5+)* Enforcement: the same session under a grant file — the
+- [x] *(M5+)* Enforcement: the same session under a grant file — the
       tool list is filtered, an in-envelope call succeeds, an
       out-of-envelope one is denied, and both are in the trace. Worked
       example below.
 
 The M1/M2 rows of this checklist are the unenforced proxy; the M5
-section below is the enforced one, and it is the only part still
-outstanding.
+section below is the enforced one. Both have now run clean — the M5
+runs, and the one flavor correction they forced, are recorded at the
+bottom.
 
 ## Checking the wire directly
 
@@ -233,34 +234,39 @@ Claude Desktop entry — same as the multi-upstream one, plus a trace:
 Prepare `C:\Users\flavi\Desktop\flavium-demo\ok.txt` with any content,
 and leave at least one other file directly on the Desktop.
 
-- [ ] **Startup.** The log shows `enforcing grants principal=desktop-bot
+- [x] **Startup.** The log shows `enforcing grants principal=desktop-bot
       grants=2` before the upstreams come up, and
       `all upstreams initialized … enforced=true`.
-- [ ] **The list is filtered.** Claude Desktop shows **2** tools for
+- [x] **The list is filtered.** Claude Desktop shows **2** tools for
       this server, not the filesystem server's full set — no
       `write_file`, no `edit_file`, no `move_file`. (The upstream still
       offers them; the client is not shown them.)
-- [ ] **In-envelope call succeeds.** "Read
+- [x] **In-envelope call succeeds.** "Read
       `C:\Users\flavi\Desktop\flavium-demo\ok.txt`" returns the file's
       contents.
-- [ ] **Out-of-envelope call is denied.** "Read the other file on my
+- [x] **Out-of-envelope call is denied.** "Read the other file on my
       Desktop" (any path outside `flavium-demo\`) comes back as a tool
       error reading `denied by policy`; the model can see the denial and
       usually says so. The log has a
       `WARN … call denied tool=read_text_file … reason=arguments outside
       the grant envelope` line.
-- [ ] **Traversal is denied too** — the row the path flavor exists for.
+- [x] **Traversal is denied too** — the row the path flavor exists for.
       Ask for
       `C:\Users\flavi\Desktop\flavium-demo\..\<the other file>`; it must
       be denied, and the trace must record the *normalized* path
-      (`C:/Users/flavi/Desktop/<the other file>`), not the one that was
-      typed. This is the check that a byte-prefix comparison alone would
-      fail.
-- [ ] **An ungranted tool is invisible and unusable.** Asking to write a
+      (`c:/users/flavi/desktop/<the other file>` — separators unified,
+      `..` resolved, ASCII case folded because the grant declared the
+      Windows flavor), not the one that was typed. This is the check
+      that a byte-prefix comparison alone would fail. Note that this row
+      is therefore indistinguishable in the trace from a direct read of
+      the same file — that is the intended record, not a gap: the
+      decision was made on the resolved path, so the record shows the
+      resolved path.
+- [x] **An ungranted tool is invisible and unusable.** Asking to write a
       file gets "no such tool" from the model; if a call is made by hand
       it answers `-32602 Unknown tool: write_file` — the same bytes as a
       tool no upstream offers.
-- [ ] **The trace.** `flavium-trace.jsonl` has one JSON object per line,
+- [x] **The trace.** `flavium-trace.jsonl` has one JSON object per line,
       `seq` dense from 1, beginning `session_started` (with the envelope)
       and ending `session_ended`, with a `call_decided` for every call
       above and a `call_completed` for each allowed one. On unix the file
@@ -343,8 +349,45 @@ it on spelling**. And rows 2–3 are the evidence that matters for the
 other direction — an upstream that resolves case-insensitively below its
 root means a folded match is the same resource, not a different one.
 
-Still owed: the Claude Desktop rows themselves — the filtered list as the
-UI renders it, and a denial as the model sees it.
+### M5 run, part two — Claude Desktop, 2026-08-16
+
+Two sessions on the folding build, `client_name="claude-ai"` version
+0.1.0, client face negotiating **2025-11-25**, same grant file, same
+upstream. Together they tick every row above.
+
+Session `1786904332-884` (18:18–18:23) — `tools_listed offered=14
+granted=2`, an in-envelope read served, `…\outside.txt` denied
+(`out_of_envelope`, with the matching `WARN … call denied` line), and
+`frames_to_upstream=2` against three calls: the denied call never
+reached the upstream, which is the property the row is really about.
+
+Session `1786905437-45460` (18:37–18:39) — the traversal row and the
+ungranted-tool row. `…\flavium-demo\..\outside.txt` was denied and
+recorded as `c:/users/flavi/desktop/outside.txt`, `..` resolved before
+the comparison; `frames_to_upstream=1` against three calls. Asking the
+model to write a file produced **no `write_file` frame at all** — no
+denial to log, because a tool it was never shown is a tool it does not
+reach for. That row's negative half is what the log can show; the
+model's own "I don't have a tool for that" is only visible in the UI.
+
+**One observation the enforced runs produced that the scripted one did
+not.** In session `1786904332-884` a call was *allowed* by policy and
+came back `is_error: true` from the upstream: the client had sent a
+fully lowercased path, flavium folded it and let it through, and
+`server-filesystem`'s own allowed-directories check — case-sensitive on
+its root — refused it. Correct behavior on both sides, and the reason
+the folding change is worded as it is: folding promises only that
+flavium is not the one refusing on spelling.
+
+It also exposes a limit of the record worth knowing before T4 builds on
+it. The two reads in that session were traced with **identical** `args`,
+one served and one refused upstream, because the trace stores the value
+the decision was made on and the difference between them was case. The
+record still reproduces the decision (D9), but it cannot show what the
+agent actually asked for, and no other artifact can either — Claude
+Desktop's MCP log does not record params. Carrying the pre-normalization
+value alongside the normalized one, when they differ, is the obvious
+remedy and is a trace-schema question for T4 rather than a proxy fix.
 
 **Known gap, Windows.** The trace file is created `0600` on unix only;
 on Windows it inherits the parent directory's ACL. Put it somewhere
@@ -372,6 +415,7 @@ same PR as this file.
 | 2026-08-15 | M1 | Claude Code (clientInfo `claude-code`) | 2.1.173, 2.1.233 | **2025-11-25** |
 | 2026-08-15 | M2 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
 | 2026-08-15 | M2 | Claude Code (clientInfo `claude-code`) | 2.1.233 | **2025-11-25** |
+| 2026-08-16 | M5 | Claude Desktop (clientInfo `claude-ai`) | 0.1.0 | **2025-11-25** |
 
 M1 run: two Claude Desktop sessions and two Claude Code sessions, all
 clean, all offering and negotiating 2025-11-25.
@@ -399,9 +443,13 @@ then refused service with
 `proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
 Claude Desktop reporting the server disconnected.
 
-M5 run: **half performed.** The scripted half is recorded above
-(2026-08-16, `secure-filesystem-server` 0.2.0, client-face
-`2025-11-25`) and it forced one flavor correction — ASCII case folding
-under `windows-path-prefix`. The Claude Desktop half is still owed.
+M5 run: **performed 2026-08-16**, in two parts recorded above — a
+scripted client first, which forced one flavor correction (ASCII case
+folding under `windows-path-prefix`), then two Claude Desktop sessions
+on the corrected build covering every checklist row. Upstream
+`secure-filesystem-server` 0.2.0 throughout; client face 2025-11-25.
+This is T1's acceptance criterion met: a real client works unmodified
+through the proxy, a grant file denies out-of-envelope calls, and the
+denials are logged.
 
 Current pin: **2025-11-25**.
