@@ -379,17 +379,50 @@ its root — refused it. Correct behavior on both sides, and the reason
 the folding change is worded as it is: folding promises only that
 flavium is not the one refusing on spelling.
 
-It also exposed a limit of the record, **since fixed**. The two reads in
-that session were traced with identical `args`, one served and one
-refused upstream, because the trace stored only the value the decision
-was made on and the difference between them was case. The record
-reproduced the decision (D9) but could not show what the agent asked
-for, and no other artifact could either — Claude Desktop's MCP log does
-not record params. `call_decided` now carries `args_as_sent` beside
-`args`, holding the caller's own spelling for the arguments
-normalization changed and only those. Re-running this session on a build
-with that field is not required to re-tick the rows above; the two reads
-would simply no longer be one line.
+It also exposed a limit of the record, **since fixed and re-run** — see
+part three. The two reads in that session were traced with identical
+`args`, one served and one refused upstream, because the trace stored
+only the value the decision was made on and the difference between them
+was case. The record reproduced the decision (D9) but could not show
+what the agent asked for, and no other artifact could either — Claude
+Desktop's MCP log does not record params. `call_decided` now carries
+`args_as_sent` beside `args`, holding the caller's own spelling for the
+arguments normalization changed and only those.
+
+### M5 run, part three — the record proving itself, 2026-08-16
+
+The point of a flight recorder is that someone can read it afterwards
+and tell what happened, so the field added for that was put in front of
+a real client rather than trusted from unit tests. Session
+`1786906802-45268`, Claude Desktop `claude-ai` 0.1.0, 19:00–19:03, same
+grant file, four asks. `frames_to_upstream=3` against five calls,
+`end=ClientEof … rejected=0 discarded=0`, no orphans.
+
+| # | `args` (evaluated) | `args_as_sent` | Outcome |
+|---|---|---|---|
+| 0 | `c:/users/flavi/desktop/flavium-demo/ok.txt` | `C:\Users\flavi\Desktop\flavium-demo\ok.txt` | allow, served |
+| 1 | `c:/users/flavi/desktop/outside.txt` | `C:\Users\flavi\Desktop\outside.txt` | **deny**, never forwarded |
+| 2 | *(`list_allowed_directories`)* | — | allow, served |
+| 3 | `c:/users/flavi/desktop/outside.txt` | `C:\Users\flavi\Desktop\flavium-demo\..\outside.txt` | **deny**, never forwarded |
+| 4 | `c:/users/flavi/desktop/flavium-demo/ok.txt` | `c:\users\flavi\desktop\flavium-demo\ok.txt` | allow, upstream `is_error` |
+
+**Calls 1 and 3 are the pair the field exists for.** Identical evaluated
+paths, identical decisions, and until this build identical lines — an
+auditor could not have told an honest read of `outside.txt` from a
+traversal aimed out of the granted directory. Now the record says which
+was which, and still says the decision was made on the resolved path.
+
+**Calls 0 and 4 are the other half.** Same evaluated path, same `allow`,
+**different outcomes** — one served, one refused by the upstream's own
+case-sensitive root check. That pair is what part two could only
+describe; the record now carries its own explanation, which is the
+difference between a log and an audit trail.
+
+Call 2 was the model's, not the checklist's: after the first denial it
+asked what directories were allowed. Worth noting because the answer it
+got (`C:\Users\flavi\Desktop`, the *upstream's* scope) does not describe
+the grant, and reading the two as one thing is the natural mistake —
+the envelope is narrower than anything the upstream will tell you.
 
 **Known gap, Windows.** The trace file is created `0600` on unix only;
 on Windows it inherits the parent directory's ACL. Put it somewhere
@@ -445,10 +478,11 @@ then refused service with
 `proxy failed: tool "read_file" is offered by both "fs" and "fs2"`,
 Claude Desktop reporting the server disconnected.
 
-M5 run: **performed 2026-08-16**, in two parts recorded above — a
+M5 run: **performed 2026-08-16**, in three parts recorded above — a
 scripted client first, which forced one flavor correction (ASCII case
 folding under `windows-path-prefix`), then two Claude Desktop sessions
-on the corrected build covering every checklist row. Upstream
+on the corrected build covering every checklist row, then a third that
+re-ran the ambiguous pair once `args_as_sent` existed. Upstream
 `secure-filesystem-server` 0.2.0 throughout; client face 2025-11-25.
 This is T1's acceptance criterion met: a real client works unmodified
 through the proxy, a grant file denies out-of-envelope calls, and the
