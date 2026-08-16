@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::task::JoinHandle;
 
 /// Pinned protocol version — recorded live from the M1 Claude Desktop
-/// demo on 2026-08-15 (docs/tasks/v0.1/T1-m1-demo.md). Keep in sync
+/// demo on 2026-08-15 (docs/tasks/v0.1/T1-demo.md). Keep in sync
 /// with proxy_e2e.rs and the scripted_upstream example.
 const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 

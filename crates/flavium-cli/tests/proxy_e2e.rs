@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Recorded live from the M1 Claude Desktop demo on 2026-08-15 — see
-/// docs/tasks/v0.1/T1-m1-demo.md; keep in sync with the
+/// docs/tasks/v0.1/T1-demo.md; keep in sync with the
 /// scripted_upstream example and the router-session tests.
 const PINNED_PROTOCOL_VERSION: &str = "2025-11-25";
 
