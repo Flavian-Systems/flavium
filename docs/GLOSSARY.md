@@ -147,7 +147,7 @@ is the source of truth for architecture; this file only fixes the words.
 ## Enforcement (the vocabulary the rest of v0.1 builds on)
 
 - **Grant** — an unforgeable authorization over one tool: argument
-  constraints + expiry (+ budget, T2). The unit of authority in flavium
+  constraints + expiry (+ budget, T2a). The unit of authority in flavium
   (`flavium_core::Grant`, M3); DESIGN's tuple (principal, tool,
   constraints, expiry, budget) is the envelope's principal × the grant.
   Cedar-backed and enforced on every call since M5. It names a **tool,
@@ -252,8 +252,11 @@ is the source of truth for architecture; this file only fixes the words.
   channel.
 - **Delegation** — a parent agent spawning a sub-agent with (strictly
   attenuated) grants; T3 work.
-- **Budget** — a quantitative cap (tokens, spend, calls, wall-clock)
-  enforced mid-execution; T2 work.
+- **Budget** — a quantitative cap enforced mid-execution; the axis is
+  reserved, not modelled yet. When it lands it is one axis on `Grant`,
+  checked by a stateful meter beside Cedar rather than inside it. Call
+  counts and wall-clock on the tool path are T2a; tokens and spend on
+  model traffic are T2b.
 - **Namespace** — per-agent renaming/virtualization of what an agent
   can even name; v0.1 scope, after T1.
 - **Trace / flight recorder** — the append-only record of every call,

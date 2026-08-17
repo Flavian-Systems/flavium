@@ -14,7 +14,9 @@ first: a throwaway spike, and *Verified* markers on what was run.
 
 ## Context
 
-v0.1 mediates tools, and only tools. Three consequences, each a
+v0.1's MCP face mediates tools, and only tools. (v0.1 also mediates model
+calls, on the separate OpenAI-compatible face of T2b — that is not an MCP
+surface and nothing below is about it.) Three consequences, each a
 deliberate T1 decision rather than an omission:
 
 - `resources/*`, `prompts/*`, `completion/complete` and every other
@@ -141,8 +143,8 @@ not a routing change.
 
 ### D4 — Sampling is opened only once it can be metered, and roots are answered from the envelope
 
-**Decision.** `sampling/createMessage` stays refused until budgets (T2)
-exist, and then becomes a grant axis with a token ceiling and a trace
+**Decision.** `sampling/createMessage` stays refused until token budgets
+(T2b) exist, and then becomes a grant axis with a token ceiling and a trace
 event per sample. `roots/list` is **answered by flavium itself** from
 the grant envelope — the roots an upstream sees are the path prefixes it
 has been granted — rather than forwarded to the client.
@@ -151,8 +153,8 @@ has been granted — rather than forwarded to the client.
 principal's token budget and writing content into the agent's context.
 It is the confused-deputy channel pointing backwards: the tool server
 borrows the agent's model. "This upstream may sample" is not a
-statement anyone can review without a bound attached, and the bound is
-exactly what T2 builds. Allowing it first and metering it later would
+statement anyone can review without a bound attached, and the bound —
+a token ceiling — is exactly what T2b builds. Allowing it first and metering it later would
 ship the unbounded version to the people most likely to keep it.
 
 **Why roots are answered locally.** Forwarding `roots/list` tells an
@@ -218,6 +220,8 @@ exists to mediate. A token endpoint is mediated and fits; a listening
 socket is new and does not. Loopback-only, bound for the duration of one
 flow, is defensible — but it is an amendment, and a security tool that
 quietly grows a listener has spent something it cannot get back.
+*(Overtaken 2026-08-17 — see the note at the end of this file: v0.1 now
+grows a listener before OAuth does, and the amendment has been made.)*
 
 **What this rules out.** Treating OAuth as a transport detail of the
 HTTP upstream, which is where it would naturally be implemented and
@@ -252,7 +256,7 @@ nothing in the current task list forces the question.
 | Event vocabulary that admits non-call authorities | — | Same |
 | Prompts | the kind axis | Vocabulary already fits (D2) |
 | Roots answered from the envelope | — | Pure attenuation, no new axis (D4) |
-| Sampling | T2 | Needs a budget to be reviewable (D4) |
+| Sampling | T2b | Needs a token budget to be reviewable (D4) |
 | Resources (read/list/templates) | a URI normalizer task | Own false-allow surface (D2) |
 | Upstream OAuth | T4 + a DESIGN §7 amendment | Custody code must be recorded (D6) |
 | `resources/subscribe` | T3 + T4 | First authority with a lifetime (D3) |
@@ -286,3 +290,32 @@ piece needs, in the repo's usual order: a spike that turns its
 *reasoned* claims into *verified* ones, a task number and acceptance
 criteria in a release's `README.md`, and — for D6 — a decision about
 DESIGN §7 taken on its own, not bundled with an implementation PR.
+
+## Note — 2026-08-17: where the v0.1 scope decision overtakes this file
+
+The scope decision recorded in
+[v0.1/README.md](v0.1/README.md#scope-decisions) puts model calls inside
+v0.1, on an OpenAI-compatible face (T2b). Three things here are affected;
+nothing above has been rewritten, because a proposal read as an audit
+trail is worth more intact than tidy.
+
+1. **D6's posture argument is overtaken, and its principle upheld.** It
+   argued that a listening socket is new, that OAuth would be the first
+   thing to grow one, and that this needs an amendment declared on its
+   own rather than slipped into an implementation PR. All three still
+   hold — except that **T2b**, not OAuth, is now the first listener, and
+   the amendment has accordingly been made up front, in DESIGN §7 and in
+   CLAUDE.md's security posture. What is left of D6 is the part that was
+   always its centre: credential custody, tokens at rest, and a refresh
+   path. Its "expands the attack surface more than any other item here"
+   risk row should be read as *among the items in this file* — T2b's face
+   is larger, and is argued in its own task.
+2. **D4's dependency is T2b, not "T2".** Sampling needs a *token*
+   ceiling, which is T2b's unit; tool-call and wall-clock caps (T2a)
+   would not make an upstream's use of your model reviewable. The
+   references above have been repointed.
+3. **The D7 deadline gets stricter, not looser.** T2a's budget axis and
+   T2b's model-call, token-tick and mid-stream-kill events are approved
+   scope landing *before* T4, so the published grant and trace formats
+   must carry them outright rather than reserve room for them. The
+   reserved-axis argument is unchanged for everything else in this file.

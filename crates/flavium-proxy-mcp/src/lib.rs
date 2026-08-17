@@ -15,7 +15,8 @@
 //! every `tools/list` shows only granted tools ([`enforcement`],
 //! [`router`]). The proxy does not know which engine answers: it holds a
 //! [`flavium_core::Authorizer`] and a [`flavium_core::TraceSink`], and the
-//! CLI decides that Cedar is behind them. Budgets are T2, delegation and
+//! CLI decides that Cedar is behind them. Tool-path budgets are T2a and the
+//! model boundary T2b (its own face, not this crate's), delegation and
 //! supervision T3, the hash-chained recorder and replay T4.
 //!
 //! How the crate is built — module map, task and channel model, message

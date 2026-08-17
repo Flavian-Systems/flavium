@@ -2,7 +2,7 @@
 //! principal make this call now?" without knowing which engine answers.
 //!
 //! The runtime engine lives in `flavium-policy` (Cedar evaluation, and from
-//! T2 stateful budget metering — both must pass). It implements this trait;
+//! T2a stateful budget metering — both must pass). It implements this trait;
 //! the CLI wires it; the proxy depends only on this crate. The reference
 //! implementation on [`GrantEnvelope`] is the *specification* the engine is
 //! tested against and a convenient test double — it is not what production

@@ -22,8 +22,10 @@ use crate::time::Timestamp;
 /// argument is admitted by its constraint ([`Constraint::admits`]); the
 /// call's other arguments are not examined.
 ///
-/// The budget axis (DESIGN §3: `budget 5/day`) is reserved for T2 and not
+/// The budget axis (DESIGN §3: `budget 5/day`) is reserved for T2a and not
 /// modelled yet — a field that is parsed but not enforced would be a lie.
+/// When it lands it carries T2a's call and wall-clock caps and T2b's token
+/// and spend caps on one axis, so it is shaped once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     /// The tool this grant authorizes.

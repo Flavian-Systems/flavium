@@ -46,7 +46,7 @@
 //! mean anything, so it stops the process; a grant that can only ever
 //! deny costs availability, never authority, so it is reported and kept.
 //!
-//! Refusing an unknown key is also what makes `budget = 5` — the T2 axis
+//! Refusing an unknown key is also what makes `budget = 5` — the T2a axis
 //! the grant vocabulary deliberately does not model yet — an error rather
 //! than a lie.
 
@@ -696,7 +696,7 @@ path = { windows-path-prefix = 'C:\Users\me\Desktop\' }
 
     #[test]
     fn unknown_keys_and_missing_pieces_refuse() {
-        // An unknown key anywhere: the T2 axis that is not modelled yet
+        // An unknown key anywhere: the T2a axis that is not modelled yet
         // is an error, not a lie.
         assert!(err(&with_grants("[[grant]]\ntool = \"t\"\nbudget = 5\n")).contains("budget"));
         assert!(err(&format!("version = 1\nnope = true\n{UPSTREAM}")).contains("nope"));
