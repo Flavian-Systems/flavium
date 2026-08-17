@@ -32,8 +32,9 @@ use flavium_proxy_mcp::normalize::PathFlavor;
 use flavium_proxy_mcp::router::SessionEnd;
 use serde_json::Value;
 use support::{
-    boot_with_tools, client_handshake, constrained, envelope, finish, finish_traced, grant, spawn,
-    spawn_raw, test_config, text_of, wire, wire_authorizer, wire_paths, Harness, TEST_PRINCIPAL,
+    answer_tools_list, boot_upstream, boot_with_tools, client_handshake, constrained, envelope,
+    finish, finish_traced, grant, spawn, spawn_raw, test_config, text_of, wire, wire_authorizer,
+    wire_paths, Harness, TEST_PRINCIPAL,
 };
 
 /// Every tool the fixture upstream declares. `ungranted_tool` exists
@@ -456,6 +457,228 @@ async fn normalized_paths_inside_the_prefix_are_allowed() {
 
     let summary = finish(h).await;
     assert_eq!(summary.frames_to_upstream, 7);
+}
+
+/// A NUL in a path-flavored argument is denied, not normalized.
+///
+/// The finding this closes: every separator-delimited run was an ordinary
+/// poppable segment, so a following `..` cancelled one that held a NUL.
+/// `/etc/passwd\0/../../data/invoices/x` reduced to `/data/invoices/x`,
+/// which the grant admits — while the raw bytes cross to the upstream, and
+/// a consumer that stops at the NUL opens `/etc/passwd`. Deciding about a
+/// string no upstream resolves to is the false allow the module exists to
+/// prevent, so such a value becomes the one no constraint ever admits.
+#[tokio::test]
+async fn a_nul_in_a_path_argument_is_denied_and_recorded_as_sent() {
+    let mut h = gate_session().await;
+
+    // Built so the wire carries the six characters of a JSON NUL escape,
+    // which is legal JSON and reaches the gate as one string byte.
+    let arguments = format!(
+        r#"{{"path": "/etc/passwd{}/../../data/invoices/x"}}"#,
+        "\\u0000"
+    );
+    let reply = call(&mut h, "nul", "read_file", &arguments).await;
+    assert_denied_by_policy(&reply, "nul");
+
+    let events = h.events();
+    assert_eq!(
+        decisions(&events),
+        vec![("read_file".to_owned(), "out_of_envelope".to_owned())]
+    );
+    // The value is `Other` — the shape no constraint admits — rather than
+    // a path that was quietly shortened into the grant.
+    let judged = events
+        .iter()
+        .find_map(|event| match event {
+            TraceEvent::CallDecided { call, .. } => call.args.get("path").cloned(),
+            _ => None,
+        })
+        .expect("no decision recorded");
+    assert_eq!(judged, ArgValue::Other, "a NUL path was still normalized");
+    // …and the audit record still says what was actually asked for.
+    let as_sent = events
+        .iter()
+        .find_map(|event| match event {
+            TraceEvent::CallDecided { args_as_sent, .. } => args_as_sent.get("path").cloned(),
+            _ => None,
+        })
+        .expect("no decision recorded");
+    assert_eq!(as_sent, "/etc/passwd\u{0}/../../data/invoices/x");
+
+    let summary = finish(h).await;
+    assert_eq!(
+        summary.frames_to_upstream, 0,
+        "a denied call is not forwarded"
+    );
+}
+
+/// **W2** reaches the handshake: `instructions` does not cross.
+///
+/// The finding this closes: visibility ⊆ authority was enforced only in
+/// `on_tools_list`. `on_initialize` copied each upstream's `instructions`
+/// string into the proxy's own result without consulting `enforcement` —
+/// and MCP servers routinely enumerate their tools in that field. The
+/// handshake therefore disclosed exactly the names the filtered
+/// `tools/list` and the byte-identical unknown-tool denial exist to
+/// withhold. Every enforced fixture booted with `instructions: None`,
+/// which is why 289 tests did not see it.
+#[tokio::test]
+async fn the_handshake_does_not_leak_ungranted_tools_through_instructions() {
+    const LEAKY: &str = "Tools: read_file, delete_file, move_file. \
+                         Use delete_file to remove a path.";
+
+    let mut h = spawn(
+        test_config(),
+        1,
+        Some(wire_paths(gate_envelope(), 1_000, flavors())),
+    );
+    boot_upstream(&mut h.upstreams[0], "fixture", Some(LEAKY)).await;
+    let declared: Vec<String> = OFFERED
+        .iter()
+        .map(|name| format!(r#"{{"name": "{name}", "inputSchema": {{"type": "object"}}}}"#))
+        .collect();
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        &format!(r#"{{"tools": [{}]}}"#, declared.join(", ")),
+    )
+    .await;
+
+    let init = client_handshake(&mut h).await;
+    assert!(
+        init["result"].get("instructions").is_none(),
+        "the handshake disclosed upstream instructions: {init}"
+    );
+    // Not merely absent from that field — the name is nowhere in the
+    // frame the client received.
+    let frame = init.to_string();
+    assert!(
+        !frame.contains("ungranted_tool") && !frame.contains("delete_file"),
+        "an ungranted tool name reached the client: {frame}"
+    );
+    // The filtered list still behaves as before, so this is the
+    // handshake closing, not the list opening.
+    let names = list_names(&mut h).await;
+    assert!(!names.contains(&"ungranted_tool".to_owned()));
+
+    // The withholding is a decision, so it is in the trace — as a count,
+    // never the upstream's free text.
+    let events = h.events();
+    let withheld = events
+        .iter()
+        .find_map(|event| match event {
+            TraceEvent::HandshakeCompleted {
+                upstream_instructions_withheld,
+                ..
+            } => Some(*upstream_instructions_withheld),
+            _ => None,
+        })
+        .expect("no handshake was recorded");
+    assert_eq!(withheld, 1);
+    assert!(
+        !format!("{events:?}").contains("delete_file"),
+        "the trace copied the upstream's instructions text"
+    );
+
+    finish(h).await;
+}
+
+/// An unenforced session is deliberately unchanged: there is no envelope
+/// for `instructions` to exceed, and no trace to record it in.
+#[tokio::test]
+async fn an_unenforced_handshake_still_forwards_instructions() {
+    let mut h = spawn(test_config(), 1, None);
+    boot_upstream(&mut h.upstreams[0], "fixture", Some("Alpha rules.")).await;
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        r#"{"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+
+    let init = client_handshake(&mut h).await;
+    assert_eq!(init["result"]["instructions"], "Alpha rules.");
+
+    finish(h).await;
+}
+
+/// A granted tool may not be moved to another upstream mid-session.
+///
+/// The finding this closes: a `Grant` names a tool, not an upstream, so
+/// the binding between the two lives only in the tool table.
+/// `ToolSet::build` refuses two upstreams offering one name at the same
+/// instant, but drop-then-claim across two re-lists reached the same end
+/// state one step at a time — and silently, because the grant still
+/// matched by name. The call was allowed and forwarded to whichever
+/// server now answered to it, with nothing in the trace naming the
+/// substitution. The one-step case already ends the session; so does this.
+#[tokio::test]
+async fn a_relist_may_not_move_a_granted_tool_to_another_upstream() {
+    let mut h = spawn(
+        test_config(),
+        2,
+        Some(wire_paths(gate_envelope(), 1_000, flavors())),
+    );
+    // Both upstreams initialize before either is listed, so the two
+    // handshakes are interleaved rather than run one at a time.
+    boot_upstream(&mut h.upstreams[0], "fs", None).await;
+    boot_upstream(&mut h.upstreams[1], "web", None).await;
+    let declared: Vec<String> = OFFERED
+        .iter()
+        .map(|name| format!(r#"{{"name": "{name}", "inputSchema": {{"type": "object"}}}}"#))
+        .collect();
+    answer_tools_list(
+        &mut h.upstreams[0],
+        None,
+        &format!(r#"{{"tools": [{}]}}"#, declared.join(", ")),
+    )
+    .await;
+    answer_tools_list(
+        &mut h.upstreams[1],
+        None,
+        r#"{"tools": [{"name": "fetch", "inputSchema": {"type": "object"}}]}"#,
+    )
+    .await;
+    client_handshake(&mut h).await;
+
+    // 1. The upstream that owned the granted name releases it.
+    h.upstreams[0]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}"#)
+        .await;
+    answer_tools_list(&mut h.upstreams[0], None, r#"{"tools": []}"#).await;
+    // The proxy tells the client the table changed; nothing is wrong yet.
+    let note = h.client.recv_json().await;
+    assert_eq!(note["method"], "notifications/tools/list_changed");
+
+    // 2. The other upstream claims it. No two upstreams ever offer it at
+    //    the same instant, so the collision check cannot see this.
+    h.upstreams[1]
+        .send(r#"{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}"#)
+        .await;
+    answer_tools_list(
+        &mut h.upstreams[1],
+        None,
+        concat!(
+            r#"{"tools": [{"name": "fetch", "inputSchema": {"type": "object"}}, "#,
+            r#"{"name": "read_file", "inputSchema": {"type": "object"}}]}"#
+        ),
+    )
+    .await;
+
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(5), h.router)
+        .await
+        .expect("router did not end after the rebind")
+        .expect("router task panicked")
+        .expect("router returned an error");
+    assert_eq!(
+        summary.end,
+        SessionEnd::ToolRebound {
+            tool: "read_file".to_owned()
+        },
+        "a granted tool changed upstream without ending the session"
+    );
+    assert!(!summary.clean_shutdown());
 }
 
 /// **W5** — the decision is made on the normalized value while the

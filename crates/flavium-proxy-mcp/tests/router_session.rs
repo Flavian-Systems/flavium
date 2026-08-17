@@ -97,8 +97,8 @@ async fn full_session_merges_routes_and_translates_byte_faithfully() {
     let mut h = spawn_router(test_config(), 2);
     boot_standard(&mut h).await;
 
-    // The proxy answers initialize itself: its own identity, exactly
-    // the capabilities it honors, labeled merged instructions.
+    // The proxy answers initialize itself: its own identity, and exactly
+    // the capabilities it honors.
     let init = client_handshake(&mut h).await;
     assert_eq!(init["id"], 0);
     assert_eq!(init["result"]["protocolVersion"], PINNED_PROTOCOL_VERSION);
@@ -107,9 +107,13 @@ async fn full_session_merges_routes_and_translates_byte_faithfully() {
         init["result"]["capabilities"],
         serde_json::json!({ "tools": { "listChanged": true } })
     );
-    assert_eq!(
-        init["result"]["instructions"],
-        "## upstream-0\n\nAlpha rules.\n\n## upstream-1\n\nBeta rules."
+    // Both upstreams here declare instructions, and this session is
+    // enforced, so none of it crosses — see
+    // `the_handshake_does_not_leak_ungranted_tools_through_instructions`
+    // in `enforcement_gate.rs`. The merge itself is unit-tested.
+    assert!(
+        init["result"].get("instructions").is_none(),
+        "instructions crossed an enforced handshake: {init}"
     );
 
     // tools/list: one unpaginated merged list, upstream order, tool

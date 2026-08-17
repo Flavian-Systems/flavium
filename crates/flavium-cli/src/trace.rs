@@ -219,6 +219,7 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             protocol_version,
             client_name,
             client_version,
+            upstream_instructions_withheld,
         } => {
             out.push_str(r#""event":"handshake_completed","offered_protocol_version":"#);
             write_capped(out, offered_protocol_version);
@@ -228,6 +229,8 @@ fn write_event(out: &mut String, event: &TraceEvent) {
             write_optional(out, client_name.as_deref());
             out.push_str(r#","client_version":"#);
             write_optional(out, client_version.as_deref());
+            out.push_str(r#","upstream_instructions_withheld":"#);
+            out.push_str(&upstream_instructions_withheld.to_string());
         }
         TraceEvent::ToolsListed {
             principal,
@@ -633,7 +636,15 @@ mod tests {
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("flavium-trace-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join(format!("{name}-{unique}.jsonl"))
+        let path = dir.join(format!("{name}-{unique}.jsonl"));
+        // The name is unique within a process, not across processes: the
+        // counter restarts at zero and Windows recycles pids freely. The
+        // sink appends by design (`--trace` continues a file), so a
+        // recycled pid would otherwise leave a test reading the previous
+        // run's lines too — which fails every `line_of` caller at once,
+        // as a JSON parse error nowhere near the real cause.
+        let _ = std::fs::remove_file(&path);
+        path
     }
 
     fn line_of(event: &TraceEvent) -> serde_json::Value {
@@ -1011,9 +1022,11 @@ mod tests {
             protocol_version: "2025-11-25".into(),
             client_name: Some("claude".into()),
             client_version: None,
+            upstream_instructions_withheld: 2,
         });
         assert_eq!(handshake["client_name"], "claude");
         assert!(handshake["client_version"].is_null());
+        assert_eq!(handshake["upstream_instructions_withheld"], 2);
 
         let upstream = line_of(&TraceEvent::UpstreamEnded {
             upstream: "fs".into(),

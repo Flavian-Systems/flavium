@@ -150,7 +150,7 @@ untrusted data and is never identity.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (namespacing is a documented follow-up). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions the client receives. |
+| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (namespacing is a documented follow-up). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions — which an **enforced** session does not forward (below). |
 | `command` | array of strings | one of `command`/`url` | Program followed by its arguments, as separate array elements — no shell is involved, so no quoting, globbing, or `$VAR` expansion. The program is resolved on `PATH` like any spawned process. The child's stdin/stdout carry MCP; its stderr is inherited from the proxy (so its logs appear next to the proxy's). Must be non-empty with a non-empty program. |
 | `url` | string | one of `command`/`url` | A streamable-HTTP MCP endpoint. Must parse and use the `http` or `https` scheme. HTTPS uses rustls with bundled roots; redirects are refused. |
 | `headers` | table of string → string | no (only with `url`) | Extra HTTP headers sent on every request to that upstream — typically `Authorization`. Names and values must be legal HTTP header syntax (a value with a newline is rejected at startup). Values are treated as secrets: never logged, never echoed in errors, never traced. Specifying `headers` on a `command` upstream is an error. |
@@ -284,13 +284,34 @@ implementation-defined and flavium will not guess. Write the prefix the
 way the calls will be written: `windows-path-prefix = '\\server\share\'`
 for a share, `'D:\data\'` or `'\data\'` for a local directory.
 
-A path prefix that normalizes to **nothing** — `"."`, `"./"`, `""`,
-`"a/.."` — is a startup error, not an empty prefix. An empty prefix
-admits every string, so accepting one would silently turn "the working
-directory" into "the whole filesystem", which is the one direction this
-design says must never happen. Write the directory you mean. (`"/"` is
-different: an operator who writes the root has said what they meant, and
-it is accepted.)
+Under `windows-path-prefix` the root also keeps the **names** in it. A
+UNC root owns its server and share and a drive-rooted path owns its
+drive, so `..` clamps at both, exactly as Windows clamps it:
+`\\attacker\pub\..\..\fileserver\reports\x` stays on `attacker` instead
+of reading as a path on `fileserver`. `path-prefix` leaves a POSIX `//`
+root unpinned — there are no names in it to protect, and pinning some
+anyway would *admit* `//a/b/../../x` under a grant on `//a/b/`.
+
+Three prefix spellings are **startup errors** rather than compiled
+constraints, because for each of them a byte prefix would mean something
+much wider than what was written:
+
+| Spelling | Why it is refused |
+|---|---|
+| normalizes to nothing — `"."`, `"./"`, `""`, `"a/.."` | An empty prefix admits every string, silently turning "the working directory" into "the whole filesystem". |
+| the bare root — `"/"`, `'\'` | `"//host/share/x"` starts with `"/"`, so a grant on this machine's root would also admit a write to an arbitrary SMB host. No byte prefix separates the two roots. |
+| only ancestors — `".."`, `"../"`, `"../../"`, `'..\'` | Further `..` *stack* rather than cancel, so `"../../etc/passwd"` starts with `"../"` while sitting a level above what the prefix names. The grant would reach every ancestor. |
+
+Write the directory you mean. `"//"` on its own is still accepted: it
+admits exactly what it says, every `//`-rooted path, with no other root
+hiding inside it. A `..` that leads somewhere specific — `"../data/"` —
+is a real directory and compiles normally.
+
+A NUL byte in a path-flavored prefix is a startup error too, and a NUL in
+a path-flavored *argument* is denied at the gate rather than normalized:
+it cannot appear in a pathname on any supported platform, and a consumer
+that stops at it would act on the bytes before it while flavium compared
+the bytes after. The trace records the spelling that was sent.
 
 Why two keys instead of one that guesses: `\` is an ordinary filename
 byte on POSIX and *the* separator on Windows, so either fixed answer is a
@@ -329,8 +350,9 @@ Refused at startup, because a malformed file could mean anything:
   would be a lie);
 - zero or two constraint keys on one argument, or `absent = false`;
 - a `range` with neither bound;
-- a `path-prefix` / `windows-path-prefix` that normalizes to nothing
-  (above);
+- a `path-prefix` / `windows-path-prefix` that normalizes to nothing, to
+  a bare root, or to nothing but `..` segments, or that contains a NUL
+  (the table above says why each is wider than it looks);
 - a `principal` or `tool` that is empty or holds a control character;
 - an `expires` without a UTC offset (`2026-09-01T00:00:00` means a
   different instant in every time zone; write `…Z` or `…+02:00`), or one
@@ -363,6 +385,39 @@ Two shapes, and the difference is deliberate.
 | A live grant names the tool, but the arguments are outside it (or the engine could not evaluate the call) | A successful JSON-RPC response carrying a tool error: `isError: true`, `"denied by policy"`. Agent-visible and recoverable — it named a tool it holds and may try again inside the envelope — and it leaks nothing about what the envelope is. |
 
 Neither reaches the upstream. Both are logged (`WARN`) and traced.
+
+### What an enforced handshake withholds
+
+Hiding a tool from `tools/list` is only worth doing if nothing else names
+it, so an **enforced** session does not forward upstream `instructions`
+to the client at all. That field is free text a server writes for the
+agent, and servers routinely list their tools in it — forwarding it would
+disclose precisely the names the filtered list and the byte-identical
+`Unknown tool` denial exist to withhold.
+
+It is dropped whole, never filtered: deciding which parts of it are safe
+would mean reading untrusted text against a grammar nobody wrote, and
+flavium does not parse what it cannot authorize. The cost is real and
+one-sided — an agent loses guidance the server meant for it — which is
+why `--unenforced` still forwards `instructions` exactly as before.
+Per-upstream opt-in is the obvious refinement and is not implemented.
+
+Because that cost is real, it is said out loud rather than only recorded:
+the handshake logs a `WARN` naming the upstreams whose instructions were
+dropped. A lost capability is only an acceptable price for a closed leak
+if somebody is told it was lost — otherwise the agent just quietly uses a
+server worse and nothing explains why.
+
+```text
+WARN flavium_proxy_mcp::router: withholding upstream instructions from the
+client: an enforced session does not forward them, because servers name
+their tools there. The agent loses that guidance; `--unenforced` forwards
+it. upstreams=fs
+```
+
+The handshake's trace event also records `upstream_instructions_withheld`,
+a count of the upstreams whose text was dropped. A count, not the text:
+the audit question is whether anything was disclosed, not what it said.
 
 ## 5. stdout, stderr, and logging
 
@@ -411,7 +466,7 @@ milliseconds, a session id (`<start-secs>-<pid>`), and an `event`:
 | `event` | When | Notable fields |
 |---|---|---|
 | `session_started` | Once, after every upstream is up | `principal`, `grants` — the policy in force, so every later `allow` index can be read against it |
-| `handshake_completed` | The client's `initialize` was answered | offered and negotiated protocol version, the client's self-reported name/version (untrusted, informational) |
+| `handshake_completed` | The client's `initialize` was answered | offered and negotiated protocol version, the client's self-reported name/version (untrusted, informational), and `upstream_instructions_withheld` — how many upstreams' `instructions` were not forwarded |
 | `tools_listed` | Each `tools/list` | `offered`, `granted`, and the `now` the filter used |
 | `call_refused` | A `tools/call` refused before any decision | `tool` (when it could be read), `reason`: `malformed_params`, `unknown_tool`, `duplicate_request_id` |
 | `call_decided` | Every authorized call | `tool`, `args` **as evaluated**, `args_as_sent` when normalization changed a value, `now`, and `decision` |

@@ -17,6 +17,12 @@
 //! With a tool name argument, several instances can sit behind one
 //! proxy without colliding — or collide on purpose, when a test wants
 //! the collision rejected.
+//!
+//! A **second** argument becomes the server's `instructions` string, the
+//! free-text field real servers use to tell an agent how to drive them —
+//! and routinely fill with their own tool names. Omitted, no field is
+//! sent at all. It exists so a test can prove an enforced handshake
+//! withholds it.
 
 // Test fixture: panicking on malformed input is acceptable here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -27,6 +33,7 @@ use serde_json::{json, Value};
 
 fn main() {
     let tool = std::env::args().nth(1).unwrap_or_else(|| "echo".to_owned());
+    let instructions = std::env::args().nth(2);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -41,15 +48,17 @@ fn main() {
         let id = message.get("id");
 
         let reply = match (method, id) {
-            (Some("initialize"), Some(id)) => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
+            (Some("initialize"), Some(id)) => {
+                let mut result = json!({
                     "protocolVersion": "2025-11-25",
                     "capabilities": { "tools": { "listChanged": true } },
                     "serverInfo": { "name": format!("scripted-upstream-{tool}"), "version": "0.0.0" }
+                });
+                if let Some(text) = &instructions {
+                    result["instructions"] = Value::String(text.clone());
                 }
-            })),
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+            }
             (Some("tools/list"), Some(id)) => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
