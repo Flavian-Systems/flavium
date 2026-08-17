@@ -1,8 +1,10 @@
 # Flavium v0.1 — task breakdown
 
-Seven tasks under six numbers deliver v0.1 (see DESIGN.md §5) — T2 is two
-tasks, T2a and T2b, so every existing reference to T3–T6 stays valid. Work
-them roughly in order — later tasks build on earlier ones. Each task gets a
+Eight tasks under seven numbers deliver v0.1 (see DESIGN.md §5) — T2 is two
+tasks, T2a and T2b, so every existing reference to T3–T6 stays valid, and
+T7 was numbered last because it was added last, not because it is worked
+last (it sits between T2b and T3 — see its entry). Otherwise work them
+roughly in order — later tasks build on earlier ones. Each task gets a
 detailed plan file here (`T<n>-<slug>.md`) written in plan mode and
 human-approved *before* implementation starts; the acceptance criteria below
 are fixed, the plans are living documents.
@@ -92,6 +94,39 @@ the README.
 
 Talk materials, examples, and integration guides. Mostly human work;
 agents assist with examples and docs.
+
+## T7 — Per-agent namespaces
+
+Visibility — DESIGN §3's second mechanism, *what can an agent even name?*
+A per-process mapping from the names the agent sees to the tools the
+upstreams actually offer (`fs.read` → upstream `fs`, wire name
+`read_file`), so the same agent code and the same grants run against
+different real resources by remapping alone — DESIGN §5's "different
+trust tiers, zero code change" made literal. `upstream.tool` prefixing is
+the degenerate form, and it closes the collision fallback T1 deferred:
+two upstreams offering the same wire name coexist behind distinct visible
+names instead of being refused. Grants keep naming the *visible* name —
+authority and topology still meet at the tool name and nowhere else — and
+the namespace, like the principal, is static per process, so the authority
+model in flavium-core (`Grant`, `decide`, `attenuates`) is untouched and
+`attenuates` needs no new axis; a T3 child inherits its parent's namespace
+verbatim, and narrowing it per child is T3's to add if it wants it. The one
+thing T7 does add to flavium-core is trace vocabulary: for every decision
+the trace must answer both what the agent named and what it resolved to,
+which is an audit field on `TraceEvent`, not an authority axis — the same
+wanted compile-error ripple through every sink as T2b's model-call events.
+Opt-in: with no mapping configured the agent sees bare wire names exactly
+as today, and collisions stay refused until the operator turns namespacing
+on for those upstreams. A visible name the namespace does not map is
+indistinguishable from an ungranted tool. Worked after T2b and before T3,
+because T3's children need a namespace to inherit and DESIGN's own example
+of one is a trust tier.
+**Done when:** the same agent and the same grants, unmodified, drive two
+differently-mapped upstream sets through a real client that sees only
+visible names; two upstreams offering the same wire name are served side by
+side under distinct visible names; an unmapped name is refused with the
+same bytes as an ungranted one; and for every decision the trace answers
+both what the agent named and what it resolved to.
 
 ## Ground rules
 
@@ -196,3 +231,74 @@ principal from config, one process — with no notion of a task inside it
 or an agent tree across it. T2a and T3 need the same missing concept. It is a design question, not a
 code dependency, and it belongs in T2a's plan — before the meter invents a
 scoping key that T3 then has to replace.
+
+### 2026-08-17 — Namespaces get a task: T7
+
+**Decision.** Per-agent namespaces become **T7**, worked between T2b and
+T3. Four sub-decisions, each with its rejected alternative below: one task
+covers both DESIGN's per-agent remapping and T1's `server.tool`
+collision fallback (spelled `upstream.tool` from here on, after the config
+key); a grant names the *visible* name and the namespace is static per
+process, so the authority model in flavium-core is untouched and the only
+core change is a trace field; namespacing is opt-in, so no existing config
+or grant file changes meaning; and the number is appended rather than
+inserted.
+
+**Why it was unowned.** DESIGN §5 lists per-agent namespaces among what
+v0.1 ships, and README's roadmap row does too. The six-task breakdown
+covered the other deliverables and never assigned this one; the glossary
+called it "v0.1 scope, after T1" and, in its collision entry, "the
+documented follow-up"; T1's plan called `server.tool` namespacing "the
+documented fallback, not T1 work"; and `docs/cli.md` tells an operator
+with colliding tool names to "wait for namespacing" — three documents
+each assuming another owned it. Found while planning what comes after T1.
+
+**Why one task, not two.** The collision fallback *is* a namespace: the
+identity mapping with the upstream's name as prefix. Delivering only the
+prefixing leaves DESIGN §5's bullet unowned; delivering only the remapping
+leaves collisions refused for anyone who did not write a mapping. Neither
+half is extra machinery given the other.
+
+**Why the grant names the visible name.** Two alternatives were weighed.
+*A grant names the real target* (`upstream` + wire name) would keep the
+namespace out of core as pure presentation, but it reverses T1's
+deliberate decision that "authority and topology meet at the tool name
+and nowhere else" — a `Grant` would gain an upstream dimension — and
+DESIGN §3's own example, `permit(invoice-bot, fs.read)`, stops matching.
+*A grant names the visible name and each principal has its own
+namespace* keeps grants as they are, but then a child could reach a real
+tool its parent cannot under the same visible name, so `attenuates` would
+have to compare namespaces too — a `Namespace` type in the verification
+target, in this task. The chosen form — visible name, one namespace per
+process, children inherit it verbatim — needs neither: the invariant is
+safe because every envelope in a tree shares one mapping, and it is
+exactly what DESIGN §5 describes (the same code at different tiers means
+different *deployments*, not parent and child in one run). If T3 wants
+per-child narrowing as visibility attenuation, that is an additive core
+change with a clear invariant, and it is T3's to argue. What the chosen
+form still costs core is one trace field — the resolved target beside the
+visible name — because `TraceEvent` is core's and "if it isn't traced it
+isn't done"; that is audit vocabulary, not authority, and it is declared
+here rather than discovered by the implementer.
+
+**Why opt-in.** Always-on `upstream.tool` would make every name
+unambiguous by construction, and it would also rename every tool in every
+existing single-upstream setup — a breaking change to the grant vocabulary
+before T4/T5 publish it as a spec. Bare names stay the default; collisions
+stay refused until namespacing is switched on for the upstreams involved.
+
+**Why T7 and not an insertion.** Same reason as the 2a/2b split: every
+existing reference to T3–T6 stays valid and no approved plan is re-read.
+The number says when it was added; the entry says when it is worked.
+
+**Left to the plan, not decided here.** The separator and its seam: `.` in
+a visible name is structure inside a string the core compares byte-wise
+— precisely the trap `mcp-surface-and-auth.md` D2 rejected for `prompt:`
+prefixes — and `ToolName` today admits any non-empty string without
+control characters, so an upstream may itself offer a wire name containing
+`.`. Whether the visible name is a distinct type from the wire name, or
+the separator is refused inside wire names, or something else, is a plan
+decision with an adversarial row table. Also the plan's: mixed sessions
+where some upstreams are namespaced and some are not; what a namespace
+means on T2b's model face (this task is tool names only); the config
+shape.

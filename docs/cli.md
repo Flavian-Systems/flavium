@@ -151,7 +151,7 @@ untrusted data and is never identity.
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (namespacing is a documented follow-up). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions — which an **enforced** session does not forward (below). |
+| `name` | string | yes | Operator-chosen label. Must be non-empty and unique across the file. Appears in logs, errors and the trace only — it is **not** prepended to tool names (opt-in namespacing is T7). With several upstreams supplying `instructions`, each block is headed `## <name>` in the merged instructions — which an **enforced** session does not forward (below). |
 | `command` | array of strings | one of `command`/`url` | Program followed by its arguments, as separate array elements — no shell is involved, so no quoting, globbing, or `$VAR` expansion. The program is resolved on `PATH` like any spawned process. The child's stdin/stdout carry MCP; its stderr is inherited from the proxy (so its logs appear next to the proxy's). Must be non-empty with a non-empty program. |
 | `url` | string | one of `command`/`url` | A streamable-HTTP MCP endpoint. Must parse and use the `http` or `https` scheme. HTTPS uses rustls with bundled roots; redirects are refused. |
 | `headers` | table of string → string | no (only with `url`) | Extra HTTP headers sent on every request to that upstream — typically `Authorization`. Names and values must be legal HTTP header syntax (a value with a newline is rejected at startup). Values are treated as secrets: never logged, never echoed in errors, never traced. Specifying `headers` on a `command` upstream is an error. |
@@ -211,8 +211,10 @@ come from, `[[grant]]` says what may be done with one, and the tool
 *name* is the only thing they share. That join is unambiguous only
 because collisions are refused (§3) — two upstreams offering `read_file`
 would make one grant mean two different things, and ambiguous routing is
-ambiguous authority — which is also why an upstream's `name` is never
-prepended to a tool's. So the two sets need not overlap, and each
+ambiguous authority — which is also why an upstream's `name` is not
+prepended to a tool's today (T7's opt-in prefix keeps the join at the
+visible tool name; grants go on naming what the agent names). So the two
+sets need not overlap, and each
 mismatch has its own answer: a grant for a tool no upstream offers is a
 startup warning, and an offered tool no grant names is filtered out of
 `tools/list` and answers a call exactly as a nonexistent tool does —
@@ -535,7 +537,7 @@ grant errors (§3, §4) are printed on their own, without the prefix.
 | `failed to connect: upstream negotiated unsupported protocol version "…"` | The server insists on a revision the proxy does not speak (it accepts `2025-06-18` and `2025-11-25`; batching-era `2025-03-26` and older, and the 2026-07-28 revision, are refused). | Use a server on a supported revision. |
 | `failed to connect: transport failed during initialize: …` | The transport itself died during the handshake: for HTTP, the server ended the session (404 under a session id) or the ordered `initialized` POST failed; for stdio, an I/O error on the pipes. | See the cause after the last colon and the surrounding log lines. |
 | `failed to list tools: …` | `initialize` succeeded but `tools/list` failed, did not parse, paged past 1 000 pages, declared more than 10 000 tools, or exceeded the byte budget. | The upstream is misbehaving; check its output with the MCP Inspector. |
-| `tool "x" is offered by both "a" and "b"` | Name collision across (or within) upstreams. | Remove one, or wait for namespacing. |
+| `tool "x" is offered by both "a" and "b"` | Name collision across (or within) upstreams. | Remove one, or wait for T7's opt-in namespacing. |
 
 A `WARN … a grant names a tool no upstream offers` line means exactly
 that: the grant is kept (it can only deny), but it is almost always a
@@ -631,7 +633,8 @@ Stated so nobody hunts for a flag that does not exist:
 - **No log-level, timeout, or frame-size flags** — `RUST_LOG` and the
   compiled-in defaults above.
 - **No environment-variable expansion in the config file.**
-- **No tool namespacing** — colliding names are refused.
+- **No tool namespacing** — colliding names are refused. T7 adds it as
+  an opt-in per upstream; bare names stay the default.
 - **No upstream supervision or restart** — an upstream ending ends the
   session (T3).
 - **No HTTP *server* face** — the MCP client side is stdio only; the

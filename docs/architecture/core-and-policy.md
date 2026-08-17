@@ -228,8 +228,11 @@ name → upstream index), and the authorizer is never told which one it is
 — its resource is `Flavium::Tool::"read_file"`. Authority and topology
 meet at the tool name and nowhere else, which is why two upstreams
 offering the same name are refused at startup (a grant would otherwise
-name two different tools) and why an upstream's `name` is never
-prepended to a tool's.
+name two different tools) and why an upstream's `name` is not prepended
+to a tool's today. T7's opt-in namespace keeps this rule rather than
+bending it: a visible name still maps to one target in the routing
+table, and a grant still names what the agent names — core sees only the
+visible name.
 
 **Grant order is significant and stable.** `grants` is a `Vec` in file
 order, indices appear in `Decision::Allow { grant }` and in the trace, and

@@ -11,8 +11,8 @@
 //!
 //! Duplicate tool names — across upstreams or within one — are rejected:
 //! a name that routes to two places is ambiguous authority, and T1
-//! resolves ambiguity by refusing to serve it (namespacing is the
-//! documented follow-up, not silent precedence).
+//! resolves ambiguity by refusing to serve it (T7's opt-in namespacing is
+//! the follow-up, not silent precedence).
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
