@@ -88,7 +88,7 @@ is the source of truth for architecture; this file only fixes the words.
 - **Collision** — the same tool name offered twice (across upstreams or
   within one). Ambiguous routing is ambiguous authority, so collisions
   are refused: at startup the proxy exits; mid-session (a re-list) the
-  session ends. Namespacing is the documented follow-up, not T1 work.
+  session ends. Namespacing (T7, opt-in) is the follow-up, not T1 work.
 - **Pagination / cursor** — how an upstream splits a long `tools/list`
   across pages (`nextCursor`). The proxy drains pagination internally
   and never mints a cursor of its own, so any cursor a client sends is
@@ -258,7 +258,10 @@ is the source of truth for architecture; this file only fixes the words.
   counts and wall-clock on the tool path are T2a; tokens and spend on
   model traffic are T2b.
 - **Namespace** — per-agent renaming/virtualization of what an agent
-  can even name; v0.1 scope, after T1.
+  can even name: a per-process mapping from the *visible* names the
+  agent uses to the wire names upstreams offer, `upstream.tool`
+  prefixing being its simplest form. Grants name the visible name;
+  the mapping is static per process like the principal. T7, opt-in.
 - **Trace / flight recorder** — the append-only record of every call,
   decision, denial, budget tick, spawn, and termination. The
   vocabulary is `flavium_core::TraceEvent` (M3; clock-free — a

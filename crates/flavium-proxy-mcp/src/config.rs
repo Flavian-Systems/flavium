@@ -13,8 +13,7 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct UpstreamSpec {
     /// Operator-chosen name, used in logs and errors only — tool names
-    /// are never rewritten in T1/M2 (namespacing is documented
-    /// follow-up work).
+    /// are never rewritten in T1/M2 (opt-in namespacing is T7).
     pub name: String,
     /// How to reach the server.
     pub transport: TransportSpec,

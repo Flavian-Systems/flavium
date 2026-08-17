@@ -833,7 +833,8 @@ into Cedar. What follows is only the seam.
   it more, it moves to its own task and this decision is revisited there.
 - **Deliberately deferred beyond T1:** upstream supervision and restart
   policies (T3 — today any upstream ending ends the session); tool
-  namespacing (`server.tool`) as the collision fallback; an HTTP *server*
+  namespacing (`upstream.tool`) as the collision fallback (T7, opt-in;
+  it lands in this crate's tool table); an HTTP *server*
   face for MCP (the OpenAI-compatible one is T2b's, and is not this
   crate's); SSE resumability; the 2026-07-28 protocol revision; budgets
   (T2a);
